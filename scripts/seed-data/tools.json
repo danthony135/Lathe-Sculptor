@@ -1,0 +1,84 @@
+[
+  {
+    "name": "Sanding Tool",
+    "type": "sanding",
+    "toolNumber": 3,
+    "params": {
+      "grit": 120,
+      "width": 50,
+      "diameter": 80,
+      "description": "Rotary sanding attachment for finishing"
+    }
+  },
+  {
+    "name": "Router Tool",
+    "type": "routing",
+    "toolNumber": 5,
+    "params": {
+      "flutes": 2,
+      "diameter": 6,
+      "description": "Detail routing and engraving",
+      "fluteLength": 20
+    }
+  },
+  {
+    "name": "Large Milling Tool",
+    "type": "milling",
+    "toolNumber": 6,
+    "params": {
+      "flutes": 4,
+      "diameter": 60,
+      "description": "Heavy stock removal milling",
+      "fluteLength": 30
+    }
+  },
+  {
+    "name": "Parting Tool",
+    "type": "parting",
+    "toolNumber": 7,
+    "params": {
+      "cutWidth": 3,
+      "description": "Workpiece parting and grooving"
+    }
+  },
+  {
+    "name": "Turning Knife #1",
+    "type": "turning",
+    "toolNumber": 4,
+    "params": {
+      "width": 0,
+      "diameter": 10,
+      "noseAngle": 55,
+      "tipRadius": 0.4,
+      "description": "Primary turning tool for profile cuts",
+      "cutDirection": "right"
+    }
+  },
+  {
+    "name": "Drill Tool",
+    "type": "drilling",
+    "toolNumber": 6,
+    "params": {
+      "width": 0,
+      "flutes": 2,
+      "diameter": 10,
+      "noseAngle": 55,
+      "tipRadius": 0.4,
+      "pointAngle": 118,
+      "description": "Center drilling and boring"
+    }
+  },
+  {
+    "name": "Turning Knife #2",
+    "type": "turning",
+    "toolNumber": 5,
+    "params": {
+      "width": 0,
+      "diameter": 10,
+      "noseAngle": 35,
+      "tipRadius": 0.2,
+      "description": "Secondary turning tool for detail work",
+      "cutDirection": "left"
+    }
+  }
+]
