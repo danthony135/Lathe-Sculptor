@@ -5,6 +5,7 @@ import { api } from "@shared/routes";
 import { z } from "zod";
 import { generateGCode, parseGCode } from "./gcode-generator";
 import { analyzeDxfFile, convertDxfToStl, convertDxfToStlWithFreeCAD } from "./cad-converter";
+import type { MachineConfig, SpindleConfig } from "@shared/schema";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -13,7 +14,7 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  
+
   // Health check for Railway
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -74,27 +75,32 @@ export async function registerRoutes(
   app.post(api.projects.generateGCode.path, async (req, res) => {
     const project = await storage.getProject(Number(req.params.id));
     if (!project) return res.status(404).json({ message: 'Project not found' });
-    
+
+    // Load machine config from settings
+    const machineConfigSetting = await storage.getSetting('machine_config');
+    const machineConfig = machineConfigSetting?.value as MachineConfig | undefined;
+
     // Generate G-code using the Catek generator with project name
     const gcode = generateGCode(project.data as any, {
-      projectName: project.name
+      projectName: project.name,
+      machineConfig,
     });
-    
+
     // Parse G-code back to toolpath for visualization
     const toolpath = parseGCode(gcode);
-    
+
     // Update project data with the new toolpath from G-code
     const updatedData = {
       ...(project.data as any),
       toolpath: toolpath.length > 0 ? toolpath : (project.data as any).toolpath
     };
-    
+
     // Save generated G-code and updated toolpath to project
-    await storage.updateProject(project.id, { 
+    await storage.updateProject(project.id, {
       gcode,
       data: updatedData
     });
-    
+
     res.json({ gcode });
   });
 
@@ -156,25 +162,50 @@ export async function registerRoutes(
     res.status(204).send();
   });
 
+  // Settings
+  app.get(api.settings.list.path, async (req, res) => {
+    const allSettings = await storage.getAllSettings();
+    res.json(allSettings);
+  });
+
+  app.get(api.settings.get.path, async (req, res) => {
+    const setting = await storage.getSetting(req.params.key);
+    if (!setting) {
+      return res.status(404).json({ message: 'Setting not found' });
+    }
+    res.json(setting);
+  });
+
+  app.put(api.settings.upsert.path, async (req, res) => {
+    const { value } = req.body;
+    const setting = await storage.upsertSetting(req.params.key, value);
+    res.json(setting);
+  });
+
+  app.delete(api.settings.delete.path, async (req, res) => {
+    await storage.deleteSetting(req.params.key);
+    res.status(204).send();
+  });
+
   // CAD File Conversion API
   // Analyze a DXF file to determine if conversion is needed
   app.post('/api/cad/analyze', async (req, res) => {
     try {
       const { content, filename } = req.body;
-      
+
       if (!content || typeof content !== 'string') {
         return res.status(400).json({ message: 'DXF content required' });
       }
-      
+
       const analysis = analyzeDxfFile(content);
-      
+
       res.json({
         filename: filename || 'unknown.dxf',
         has3DSolid: analysis.has3DSolid,
         entityTypes: analysis.entityTypes,
         boundingBox: analysis.boundingBox,
         needsConversion: analysis.has3DSolid,
-        message: analysis.has3DSolid 
+        message: analysis.has3DSolid
           ? 'File contains 3DSOLID entities that need conversion to mesh format'
           : 'File contains standard 2D/3D entities that can be imported directly',
       });
@@ -188,14 +219,14 @@ export async function registerRoutes(
   app.post('/api/cad/convert', async (req, res) => {
     try {
       const { content, filename } = req.body;
-      
+
       if (!content || typeof content !== 'string') {
         return res.status(400).json({ message: 'DXF content required' });
       }
-      
+
       // Use enhanced converter that tries FreeCAD first
       const result = await convertDxfToStlWithFreeCAD(content, filename || 'model.dxf');
-      
+
       if (result.success) {
         res.json({
           success: true,
@@ -222,6 +253,9 @@ export async function registerRoutes(
   // Seed Catek 7-in-1 default tools if empty
   await seedDefaultTools();
 
+  // Seed default machine config if not set
+  await seedDefaultMachineConfig();
+
   return httpServer;
 }
 
@@ -234,30 +268,32 @@ async function seedDefaultTools() {
         toolNumber: 1,
         name: "Turning Knife #1",
         type: "turning",
-        params: { 
-          tipRadius: 0.4, 
+        params: {
+          tipRadius: 0.4,
           noseAngle: 55,
           cutDirection: 'right',
-          description: 'Primary turning tool for profile cuts'
+          description: 'Primary turning tool for profile cuts',
+          offsets: { offsetX: 0, offsetZ: 0, wearOffsetX: 0, wearOffsetZ: 0 }
         }
       },
       {
         toolNumber: 2,
         name: "Turning Knife #2",
         type: "turning",
-        params: { 
-          tipRadius: 0.2, 
+        params: {
+          tipRadius: 0.2,
           noseAngle: 35,
           cutDirection: 'left',
-          description: 'Secondary turning tool for detail work'
+          description: 'Secondary turning tool for detail work',
+          offsets: { offsetX: 0, offsetZ: 0, wearOffsetX: 0, wearOffsetZ: 0 }
         }
       },
       {
         toolNumber: 3,
         name: "Sanding Tool",
         type: "sanding",
-        params: { 
-          diameter: 80, 
+        params: {
+          diameter: 80,
           grit: 120,
           width: 50,
           description: 'Rotary sanding attachment for finishing'
@@ -267,42 +303,84 @@ async function seedDefaultTools() {
         toolNumber: 4,
         name: "Drill Tool",
         type: "drilling",
-        params: { 
-          diameter: 10, 
+        params: {
+          diameter: 10,
           pointAngle: 118,
           flutes: 2,
-          description: 'Center drilling and boring'
+          description: 'Center drilling and boring',
+          offsets: { offsetX: 0, offsetZ: 0, wearOffsetX: 0, wearOffsetZ: 0 }
         }
       },
       {
         toolNumber: 5,
-        name: "Router Tool",
+        name: "Router / Engraving Tool",
         type: "routing",
-        params: { 
-          diameter: 6, 
+        params: {
+          diameter: 6,
           fluteLength: 20,
           flutes: 2,
-          description: 'Detail routing and engraving'
+          description: 'Detail routing and engraving',
+          offsets: { offsetX: 0, offsetZ: 0, wearOffsetX: 0, wearOffsetZ: 0 }
         }
       },
       {
         toolNumber: 6,
-        name: "Large Milling Tool",
-        type: "milling",
-        params: { 
-          diameter: 60, 
-          fluteLength: 30,
-          flutes: 4,
-          description: 'Heavy stock removal milling'
+        name: "Planer Blade",
+        type: "planing",
+        params: {
+          width: 100,
+          cutDepth: 3,
+          description: 'Surface planing with 7.5kW planer spindle'
         }
       },
       {
         toolNumber: 7,
-        name: "Parting Tool",
-        type: "parting",
-        params: { 
+        name: "Parting / Grooving Tool",
+        type: "grooving",
+        params: {
           cutWidth: 3,
-          description: 'Workpiece parting and grooving'
+          maxDepth: 50,
+          profile: 'square',
+          description: 'Workpiece parting and grooving',
+          offsets: { offsetX: 0, offsetZ: 0, wearOffsetX: 0, wearOffsetZ: 0 }
+        }
+      },
+      {
+        toolNumber: 8,
+        name: "V-Bit 60°",
+        type: "v_bit",
+        params: {
+          angle: 60,
+          tipWidth: 0,
+          maxDepth: 10,
+          description: 'V-carving and engraving',
+          offsets: { offsetX: 0, offsetZ: 0, wearOffsetX: 0, wearOffsetZ: 0 }
+        }
+      },
+      {
+        toolNumber: 9,
+        name: "Ball Nose 6mm",
+        type: "ball_nose",
+        params: {
+          diameter: 6,
+          effectiveRadius: 3,
+          neckDiameter: 6,
+          fluteLength: 20,
+          flutes: 2,
+          description: '3D carving and surface finishing',
+          offsets: { offsetX: 0, offsetZ: 0, wearOffsetX: 0, wearOffsetZ: 0 }
+        }
+      },
+      {
+        toolNumber: 10,
+        name: "Threading Tool",
+        type: "threading",
+        params: {
+          pitch: 2,
+          threadAngle: 60,
+          insertType: 'full',
+          description: 'Wood threading insert',
+          offsets: { offsetX: 0, offsetZ: 0, wearOffsetX: 0, wearOffsetZ: 0 }
         }
       }
     ];
@@ -310,5 +388,94 @@ async function seedDefaultTools() {
     for (const tool of defaultTools) {
       await storage.createTool(tool);
     }
+  }
+}
+
+async function seedDefaultMachineConfig() {
+  const existing = await storage.getSetting('machine_config');
+  if (!existing) {
+    const defaultConfig: MachineConfig = {
+      name: "Catek 7-in-1",
+      model: "CK-1530-7T",
+      maxDiameter: 300,
+      maxLength: 1500,
+      axes: 4,
+      hasB_axis: false,
+      spindles: [
+        {
+          id: 'main',
+          name: 'Main Spindle (A-axis)',
+          type: 'main',
+          maxRPM: 6000,
+          power: 4,
+          mCodes: { start: 'M03', stop: 'M05', reverse: 'M04' }
+        },
+        {
+          id: 'milling1',
+          name: 'Milling Spindle #1',
+          type: 'milling1',
+          maxRPM: 18000,
+          power: 6,
+          mCodes: { start: 'M13', stop: 'M15' }
+        },
+        {
+          id: 'milling2',
+          name: 'Milling Spindle #2',
+          type: 'milling2',
+          maxRPM: 18000,
+          power: 6,
+          mCodes: { start: 'M23', stop: 'M25' }
+        },
+        {
+          id: 'milling3',
+          name: 'Milling Spindle #3',
+          type: 'milling3',
+          maxRPM: 18000,
+          power: 6,
+          mCodes: { start: 'M33', stop: 'M35' }
+        },
+        {
+          id: 'planer',
+          name: 'Planer Spindle',
+          type: 'planer',
+          maxRPM: 18000,
+          power: 7.5,
+          mCodes: { start: 'M43', stop: 'M45' }
+        },
+        {
+          id: 'sanding',
+          name: 'Sanding Motor',
+          type: 'sanding',
+          maxRPM: 6000,
+          power: 1.1,
+          mCodes: { start: 'M53', stop: 'M55' }
+        }
+      ],
+      safeX: 100,
+      safeY: 75,
+      safeZ: 50,
+      defaultRapidFeed: 5000,
+      defaultWorkFeed: 200,
+      defaultSpindleRPM: 2100,
+      loaderCodes: {
+        release: 'M69',
+        start: 'M70',
+        position: 'M71',
+        complete: 'M72',
+        clamp: 'M68',
+      },
+      auxCodes: {
+        dustOn: 'M76',
+        dustOff: 'M77',
+      },
+      postProcessor: {
+        programEnd: 'M30',
+        toolFormat: 'Ttttt',
+        coordinateSystem: 'G55',
+        units: 'metric',
+        xAxisMode: 'diameter',
+      },
+    };
+    await storage.upsertSetting('machine_config', defaultConfig);
   }
 }

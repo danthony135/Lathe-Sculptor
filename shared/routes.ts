@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { insertProjectSchema, insertToolSchema, projects, tools } from './schema';
+import { insertProjectSchema, insertToolSchema, projects, tools, settings } from './schema';
 
 // ============================================
 // SHARED ERROR SCHEMAS
@@ -106,6 +106,38 @@ export const api = {
       responses: {
         204: z.void(),
         404: errorSchemas.notFound,
+      },
+    },
+  },
+  settings: {
+    list: {
+      method: 'GET' as const,
+      path: '/api/settings',
+      responses: {
+        200: z.array(z.custom<typeof settings.$inferSelect>()),
+      },
+    },
+    get: {
+      method: 'GET' as const,
+      path: '/api/settings/:key',
+      responses: {
+        200: z.custom<typeof settings.$inferSelect>(),
+        404: errorSchemas.notFound,
+      },
+    },
+    upsert: {
+      method: 'PUT' as const,
+      path: '/api/settings/:key',
+      input: z.object({ value: z.any() }),
+      responses: {
+        200: z.custom<typeof settings.$inferSelect>(),
+      },
+    },
+    delete: {
+      method: 'DELETE' as const,
+      path: '/api/settings/:key',
+      responses: {
+        204: z.void(),
       },
     },
   },

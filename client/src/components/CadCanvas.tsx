@@ -1,20 +1,20 @@
 import { useRef, useState, useEffect } from "react";
-import type { MachineStock, Point, ProfileSegment } from "@shared/schema";
-import { PanZoom, TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
+import type { MachineStock, Point3D, ProfileSegment3D } from "@shared/schema";
+import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 import { Ruler, Maximize, MousePointer2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface CadCanvasProps {
   stock: MachineStock;
-  profile: ProfileSegment[];
+  profile: ProfileSegment3D[];
   mode: "select" | "draw_line" | "draw_arc";
-  onProfileChange: (profile: ProfileSegment[]) => void;
+  onProfileChange: (profile: ProfileSegment3D[]) => void;
   className?: string;
 }
 
 export function CadCanvas({ stock, profile, mode, onProfileChange, className }: CadCanvasProps) {
-  const [hoverPoint, setHoverPoint] = useState<Point | null>(null);
-  const [activePoint, setActivePoint] = useState<Point | null>(null);
+  const [hoverPoint, setHoverPoint] = useState<Point3D | null>(null);
+  const [activePoint, setActivePoint] = useState<Point3D | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -53,12 +53,12 @@ export function CadCanvas({ stock, profile, mode, onProfileChange, className }: 
     if (mode === 'draw_line') {
       // Mock logic: add a point connected to last point
       const lastSegment = profile[profile.length - 1];
-      const start = lastSegment ? lastSegment.end : { x: 0, z: 0 };
-      
+      const start = lastSegment ? lastSegment.end : { x: 0, y: 0, z: 0 };
+
       // For demo: click adds a point 10mm to the right and same diameter
-      const newEnd = { x: start.x, z: start.z + 10 };
+      const newEnd = { x: start.x, y: start.y, z: start.z + 10 };
       
-      const newSegment: ProfileSegment = {
+      const newSegment: ProfileSegment3D = {
         id: Math.random().toString(36).substr(2, 9),
         type: 'line',
         start,

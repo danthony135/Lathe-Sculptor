@@ -20,6 +20,10 @@ const toolTypes = [
   { value: "sanding", label: "Sanding Tool" },
   { value: "milling", label: "Milling Tool" },
   { value: "routing", label: "Router Bit" },
+  { value: "planing", label: "Planer Blade" },
+  { value: "v_bit", label: "V-Bit (Engraving)" },
+  { value: "ball_nose", label: "Ball Nose End Mill" },
+  { value: "threading", label: "Threading Tool" },
   { value: "custom", label: "Custom Type..." },
 ];
 

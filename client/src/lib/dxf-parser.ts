@@ -1,5 +1,7 @@
 import DxfParser from 'dxf-parser';
-import { Dwg_File_Type, LibreDwg } from '@mlightcad/libredwg-web';
+// @ts-ignore - optional dependency, may not be installed
+let LibreDwg: any, Dwg_File_Type: any;
+try { ({ LibreDwg, Dwg_File_Type } = require('@mlightcad/libredwg-web')); } catch {};
 import type { Point3D, ProfileSegment3D, ImportedGeometry } from '@shared/schema';
 
 /**

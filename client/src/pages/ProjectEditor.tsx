@@ -19,7 +19,7 @@ import {
   Upload, Download, Copy, RotateCcw, AlertTriangle,
   Wrench, Settings2, Trash2, ChevronDown, ChevronUp, GripVertical
 } from "lucide-react";
-import type { ProjectData, ToolpathPoint, Operation, ImportedGeometry, Tool } from "@shared/schema";
+import type { ProjectData, ToolpathPoint, Operation, OperationType, ImportedGeometry, Tool } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
 
 const DEFAULT_PROJECT_DATA: ProjectData = {
@@ -279,19 +279,23 @@ export default function ProjectEditor() {
   const updateOperationType = (opId: string, type: Operation['type']) => {
     setLocalData(prev => prev ? ({
       ...prev,
-      operations: prev.operations.map(op => 
-        op.id === opId 
-          ? { 
-              ...op, 
+      operations: prev.operations.map(op =>
+        op.id === opId
+          ? {
+              ...op,
               type,
               // Set sensible defaults based on operation type
-              rotationMode: type === 'turning' || type === 'sanding' 
-                ? 'continuous' 
-                : type === 'milling' || type === 'routing'
+              rotationMode: type === 'turning' || type === 'sanding' || type === 'roughing' || type === 'finishing'
+                ? 'continuous'
+                : type === 'milling' || type === 'routing' || type === 'planing'
                   ? 'indexed'
-                  : type === 'drilling'
+                  : type === 'drilling' || type === 'engraving'
                     ? 'static'
-                    : op.rotationMode
+                    : type === 'carving_3d' || type === 'contouring_4axis'
+                      ? 'simultaneous'
+                      : type === 'threading' || type === 'grooving'
+                        ? 'continuous'
+                        : op.rotationMode
             }
           : op
       ),
@@ -705,13 +709,19 @@ export default function ProjectEditor() {
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
-                                    <SelectItem value="turning">Turning (lathe)</SelectItem>
-                                    <SelectItem value="milling">Milling</SelectItem>
                                     <SelectItem value="roughing">Roughing</SelectItem>
+                                    <SelectItem value="turning">Turning (profile)</SelectItem>
                                     <SelectItem value="finishing">Finishing</SelectItem>
                                     <SelectItem value="sanding">Sanding</SelectItem>
+                                    <SelectItem value="milling">Milling</SelectItem>
                                     <SelectItem value="drilling">Drilling</SelectItem>
+                                    <SelectItem value="grooving">Grooving</SelectItem>
+                                    <SelectItem value="threading">Threading</SelectItem>
+                                    <SelectItem value="planing">Planing</SelectItem>
+                                    <SelectItem value="engraving">Engraving</SelectItem>
                                     <SelectItem value="routing">Routing</SelectItem>
+                                    <SelectItem value="carving_3d">3D Carving</SelectItem>
+                                    <SelectItem value="contouring_4axis">4-Axis Contouring</SelectItem>
                                   </SelectContent>
                                 </Select>
                               </div>
@@ -729,6 +739,7 @@ export default function ProjectEditor() {
                                     <SelectItem value="continuous">Continuous (turning/lathe)</SelectItem>
                                     <SelectItem value="indexed">Indexed (rotate, stop, mill)</SelectItem>
                                     <SelectItem value="static">Static (no rotation)</SelectItem>
+                                    <SelectItem value="simultaneous">Simultaneous (4-axis)</SelectItem>
                                   </SelectContent>
                                 </Select>
                               </div>
@@ -754,6 +765,295 @@ export default function ProjectEditor() {
                                       className="font-mono text-right"
                                       data-testid={`input-index-angle-${op.id}`}
                                     />
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Drilling-specific params */}
+                              {op.type === 'drilling' && (
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Hole Depth (mm)</Label>
+                                    <Input type="number" value={op.params.drilling?.holeDepth || 10}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, drilling: { ...o.params.drilling, holeDepth: parseFloat(e.target.value) || 10, peckDepth: o.params.drilling?.peckDepth || 3, retractHeight: o.params.drilling?.retractHeight || 2, drillCycle: o.params.drilling?.drillCycle || 'peck', throughHole: o.params.drilling?.throughHole || false } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Peck Depth (mm)</Label>
+                                    <Input type="number" value={op.params.drilling?.peckDepth || 3}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, drilling: { ...o.params.drilling!, peckDepth: parseFloat(e.target.value) || 3 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1 col-span-2">
+                                    <Label className="text-xs">Drill Cycle</Label>
+                                    <Select value={op.params.drilling?.drillCycle || 'peck'}
+                                      onValueChange={v => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, drilling: { ...o.params.drilling!, drillCycle: v as any } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }}>
+                                      <SelectTrigger className="text-xs"><SelectValue /></SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="spot">Spot Drill (G81)</SelectItem>
+                                        <SelectItem value="peck">Peck Drill (G83)</SelectItem>
+                                        <SelectItem value="deep_peck">Deep Peck (G83)</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Grooving-specific params */}
+                              {op.type === 'grooving' && (
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Groove Width (mm)</Label>
+                                    <Input type="number" value={op.params.grooving?.grooveWidth || 3}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, grooving: { grooveWidth: parseFloat(e.target.value) || 3, grooveDepth: o.params.grooving?.grooveDepth || 5, grooveProfile: o.params.grooving?.grooveProfile || 'square', grooveCount: o.params.grooving?.grooveCount || 1, zPositions: o.params.grooving?.zPositions || [-50] } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Groove Depth (mm)</Label>
+                                    <Input type="number" value={op.params.grooving?.grooveDepth || 5}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, grooving: { ...o.params.grooving!, grooveDepth: parseFloat(e.target.value) || 5 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1 col-span-2">
+                                    <Label className="text-xs">Groove Profile</Label>
+                                    <Select value={op.params.grooving?.grooveProfile || 'square'}
+                                      onValueChange={v => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, grooving: { ...o.params.grooving!, grooveProfile: v as any } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }}>
+                                      <SelectTrigger className="text-xs"><SelectValue /></SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="square">Square</SelectItem>
+                                        <SelectItem value="v">V-Groove</SelectItem>
+                                        <SelectItem value="round">Round</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Threading-specific params */}
+                              {op.type === 'threading' && (
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Pitch (mm)</Label>
+                                    <Input type="number" step="0.1" value={op.params.threading?.pitch || 2}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, threading: { pitch: parseFloat(e.target.value) || 2, threadDepth: o.params.threading?.threadDepth || 1.3, threadType: o.params.threading?.threadType || 'external', threadForm: o.params.threading?.threadForm || 'v60', startZ: o.params.threading?.startZ || 0, endZ: o.params.threading?.endZ || -50, infeedAngle: o.params.threading?.infeedAngle || 29.5, springPasses: o.params.threading?.springPasses || 2, firstCutDepth: o.params.threading?.firstCutDepth || 0.3, minCutDepth: o.params.threading?.minCutDepth || 0.05 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Thread Depth (mm)</Label>
+                                    <Input type="number" step="0.1" value={op.params.threading?.threadDepth || 1.3}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, threading: { ...o.params.threading!, threadDepth: parseFloat(e.target.value) || 1.3 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Type</Label>
+                                    <Select value={op.params.threading?.threadType || 'external'}
+                                      onValueChange={v => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, threading: { ...o.params.threading!, threadType: v as any } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }}>
+                                      <SelectTrigger className="text-xs"><SelectValue /></SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="external">External</SelectItem>
+                                        <SelectItem value="internal">Internal</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Spring Passes</Label>
+                                    <Input type="number" value={op.params.threading?.springPasses || 2}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, threading: { ...o.params.threading!, springPasses: parseInt(e.target.value) || 2 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Planing-specific params */}
+                              {op.type === 'planing' && (
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Depth Per Pass (mm)</Label>
+                                    <Input type="number" step="0.5" value={op.params.planing?.planerDepthPerPass || 2}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, planing: { planerDepthPerPass: parseFloat(e.target.value) || 2, surfaceTarget: o.params.planing?.surfaceTarget || 'top', flatteningAllowance: o.params.planing?.flatteningAllowance || 5, passDirection: o.params.planing?.passDirection || 'climb', aAxisAngle: o.params.planing?.aAxisAngle || 0 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Total Removal (mm)</Label>
+                                    <Input type="number" step="0.5" value={op.params.planing?.flatteningAllowance || 5}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, planing: { ...o.params.planing!, flatteningAllowance: parseFloat(e.target.value) || 5 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">A-Axis Angle (°)</Label>
+                                    <Input type="number" value={op.params.planing?.aAxisAngle || 0}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, planing: { ...o.params.planing!, aAxisAngle: parseFloat(e.target.value) || 0 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Direction</Label>
+                                    <Select value={op.params.planing?.passDirection || 'climb'}
+                                      onValueChange={v => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, planing: { ...o.params.planing!, passDirection: v as any } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }}>
+                                      <SelectTrigger className="text-xs"><SelectValue /></SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="climb">Climb</SelectItem>
+                                        <SelectItem value="conventional">Conventional</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Engraving-specific params */}
+                              {op.type === 'engraving' && (
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="space-y-1 col-span-2">
+                                    <Label className="text-xs">Text to Engrave</Label>
+                                    <Input value={op.params.engraving?.text || ''}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, engraving: { text: e.target.value, engravingDepth: o.params.engraving?.engravingDepth || 1, surfaceAngle: o.params.engraving?.surfaceAngle || 0, position: o.params.engraving?.position || { z: -50, offset: 0 } } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono" placeholder="Enter text..." />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Engrave Depth (mm)</Label>
+                                    <Input type="number" step="0.1" value={op.params.engraving?.engravingDepth || 1}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, engraving: { ...o.params.engraving!, engravingDepth: parseFloat(e.target.value) || 1 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Surface Angle (°)</Label>
+                                    <Input type="number" value={op.params.engraving?.surfaceAngle || 0}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, engraving: { ...o.params.engraving!, surfaceAngle: parseFloat(e.target.value) || 0 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* 3D Carving-specific params */}
+                              {op.type === 'carving_3d' && (
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="space-y-1 col-span-2">
+                                    <Label className="text-xs">Finishing Strategy</Label>
+                                    <Select value={op.params.carving3d?.finishingStrategy || 'raster'}
+                                      onValueChange={v => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, carving3d: { finishingStrategy: v as any, scallopHeight: o.params.carving3d?.scallopHeight || 0.1, stepdown: o.params.carving3d?.stepdown || 3, boundaryOffset: o.params.carving3d?.boundaryOffset || 2 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }}>
+                                      <SelectTrigger className="text-xs"><SelectValue /></SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="raster">Raster (Zigzag)</SelectItem>
+                                        <SelectItem value="spiral">Spiral</SelectItem>
+                                        <SelectItem value="flowline">Flowline</SelectItem>
+                                        <SelectItem value="constant_z">Constant Z</SelectItem>
+                                        <SelectItem value="pencil">Pencil</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Scallop Height (mm)</Label>
+                                    <Input type="number" step="0.01" value={op.params.carving3d?.scallopHeight || 0.1}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, carving3d: { ...o.params.carving3d!, scallopHeight: parseFloat(e.target.value) || 0.1 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Stepdown (mm)</Label>
+                                    <Input type="number" step="0.5" value={op.params.carving3d?.stepdown || 3}
+                                      onChange={e => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, carving3d: { ...o.params.carving3d!, stepdown: parseFloat(e.target.value) || 3 } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }} className="font-mono text-right" />
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* 4-Axis Contouring-specific params */}
+                              {op.type === 'contouring_4axis' && (
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="space-y-1 col-span-2">
+                                    <Label className="text-xs">Pattern Type</Label>
+                                    <Select value={op.params.contouring4axis?.patternType || 'spiral_flute'}
+                                      onValueChange={v => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, contouring4axis: { patternType: v as any, feedMode: o.params.contouring4axis?.feedMode || 'inverse_time' } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }}>
+                                      <SelectTrigger className="text-xs"><SelectValue /></SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="spiral_flute">Spiral Flute</SelectItem>
+                                        <SelectItem value="wrapped_pattern">Wrapped Pattern</SelectItem>
+                                        <SelectItem value="helical">Helical</SelectItem>
+                                        <SelectItem value="custom">Custom</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Feed Mode</Label>
+                                    <Select value={op.params.contouring4axis?.feedMode || 'inverse_time'}
+                                      onValueChange={v => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, contouring4axis: { ...o.params.contouring4axis!, feedMode: v as any } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }}>
+                                      <SelectTrigger className="text-xs"><SelectValue /></SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="standard">Standard (G94)</SelectItem>
+                                        <SelectItem value="inverse_time">Inverse Time (G93)</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  {op.params.contouring4axis?.patternType === 'helical' && (
+                                    <div className="space-y-1">
+                                      <Label className="text-xs">Helical Pitch (mm)</Label>
+                                      <Input type="number" step="0.5" value={op.params.contouring4axis?.helicalPitch || 10}
+                                        onChange={e => {
+                                          setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, contouring4axis: { ...o.params.contouring4axis!, helicalPitch: parseFloat(e.target.value) || 10 } } } : o) }) : null);
+                                          setHasUnsavedChanges(true);
+                                        }} className="font-mono text-right" />
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* Sanding-specific params */}
+                              {op.type === 'sanding' && (
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="space-y-1 col-span-2">
+                                    <Label className="text-xs">Paddle Offset (mm deeper than profile)</Label>
+                                    <Input type="number" step="0.1" value={op.params.paddleOffset || 1.0}
+                                      onChange={e => updateOperation(op.id, 'paddleOffset', parseFloat(e.target.value) || 1.0)}
+                                      className="font-mono text-right" />
                                   </div>
                                 </div>
                               )}
