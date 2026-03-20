@@ -6,6 +6,7 @@ import { z } from "zod";
 import { generateGCode, parseGCode } from "./gcode-generator";
 import { analyzeDxfFile, convertDxfToStl, convertDxfToStlWithFreeCAD } from "./cad-converter";
 import { textToToolpath } from "./engraving-engine";
+import { analyzeGeometry } from "./geometry-analyzer";
 import { extractTriangles, sampleSurface, generateFinishingToolpath, generateRoughingToolpath, generateSpiralFlutes, generateWrappedPattern, generateHelicalPath, convertToInverseTime } from "./toolpath-engine";
 import type { MachineConfig, SpindleConfig, ToolpathPoint, Carving3DParams } from "@shared/schema";
 import * as fs from "fs";
@@ -192,6 +193,19 @@ export async function registerRoutes(
   // ============================================================
   // TOOLPATH GENERATION ENDPOINTS
   // ============================================================
+
+  // Geometry Analysis: auto-detect operations from imported geometry
+  app.post('/api/analyze-geometry', async (req, res) => {
+    try {
+      const { geometry, material } = req.body;
+      if (!geometry) return res.status(400).json({ message: 'Geometry data required' });
+      const result = analyzeGeometry(geometry, material || 'oak');
+      res.json(result);
+    } catch (err: any) {
+      console.error('Geometry analysis error:', err);
+      res.status(500).json({ message: err.message || 'Failed to analyze geometry' });
+    }
+  });
 
   // Engraving: text → toolpath
   app.post('/api/toolpath/engrave', async (req, res) => {

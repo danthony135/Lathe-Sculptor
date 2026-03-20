@@ -382,7 +382,7 @@ export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
     
     // Log entity types for debugging
     const entityTypes = new Set(allEntities.map(e => e.type));
-    console.log(`DXF file contains ${allEntities.length} entities of types:`, Array.from(entityTypes));
+    // DXF entity summary (debug only)
 
     if (allEntities.length === 0) {
       throw new Error('Invalid DXF file: No entities found in file or blocks');
@@ -409,9 +409,6 @@ export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
       const entity = rawEntity as any;
       switch (entity.type) {
         case 'LINE': {
-          // Debug: log raw entity data
-          console.log('LINE entity raw data:', JSON.stringify(entity, null, 2));
-          
           // Handle both vertex array format and startPoint/endPoint format
           let start: Point3D;
           let end: Point3D;
@@ -758,19 +755,19 @@ export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
         
         case 'INSERT': {
           // INSERT references a block - log for debugging
-          console.log('INSERT entity found referencing block:', entity.name || entity.blockName);
+          // INSERT entity — block reference (not yet supported)
           break;
         }
         
         case '3DSOLID': {
           // 3DSOLID contains ACIS encoded geometry - we'll extract bounds from header instead
-          console.log('3DSOLID entity found - will use header bounds to create profile');
+          // 3DSOLID detected — will approximate from header bounds
           break;
         }
         
         default: {
           // Log unhandled entity types for debugging
-          console.log('Unhandled DXF entity type:', entity.type);
+          // Unhandled entity type — skip silently
           break;
         }
       }
@@ -778,20 +775,20 @@ export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
 
     // If no geometry was extracted but we have 3DSOLID entities, try to extract from header bounds
     if (vertices.length === 0 && entityTypes.has('3DSOLID')) {
-      console.log('Attempting to extract geometry from 3DSOLID using header bounds...');
+      // Attempt to extract geometry from 3DSOLID using header bounds
       
       // Parse header bounds directly from raw text
       const headerBounds = extractDxfHeaderBounds(text);
       
       if (headerBounds) {
-        console.log('Extracted header bounds:', headerBounds);
+        // Header bounds extracted successfully
         
         // Determine part orientation based on dimensions
         const xSpan = headerBounds.max.x - headerBounds.min.x;
         const ySpan = headerBounds.max.y - headerBounds.min.y;
         const zSpan = headerBounds.max.z - headerBounds.min.z;
         
-        console.log(`Part dimensions: X=${xSpan.toFixed(1)}, Y=${ySpan.toFixed(1)}, Z=${zSpan.toFixed(1)}`);
+        // Part dimensions calculated
         
         // For lathe parts, the longest axis is typically the length
         // The other two axes define the cross-section
@@ -816,7 +813,7 @@ export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
           partRadius = Math.max(xSpan, ySpan) / 2;
         }
         
-        console.log(`Detected: Length axis=${lengthAxis}, Length=${partLength.toFixed(1)}mm, Radius=${partRadius.toFixed(1)}mm`);
+        // Axis detection complete
         
         // Create a basic cylindrical profile from the bounds
         // This creates a simple turned profile that can be refined
@@ -861,7 +858,7 @@ export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
           }
         }
         
-        console.log(`Created ${vertices.length} profile points from 3DSOLID bounds`);
+        // Profile points created from 3DSOLID bounds
       }
     }
 
@@ -1217,12 +1214,13 @@ export async function parseStlFile(file: File): Promise<ImportedGeometry> {
           maxY = Math.max(maxY, y);
           maxZ = Math.max(maxZ, z);
           
-          // Sample vertices for the profile (every 10th vertex)
-          if (i % 10 === 0) {
+          // Keep all vertices for accurate bounding box and analysis
+          // (meshData stores the full vertex array for rendering)
+          if (i % 3 === 0) { // Sample every 3rd for profile (1 per triangle)
             vertices.push({ x, y, z });
           }
         }
-        
+
         resolve({
           sourceFile: file.name,
           fileType: 'stl',
@@ -1300,7 +1298,7 @@ export async function parseObjFile(file: File): Promise<ImportedGeometry> {
                 maxY = Math.max(maxY, y);
                 maxZ = Math.max(maxZ, z);
                 
-                if (i % 10 === 0) {
+                if (i % 3 === 0) {
                   vertices.push({ x, y, z });
                 }
               }

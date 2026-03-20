@@ -55,8 +55,10 @@ export default function ProjectEditor() {
   const [expandedOps, setExpandedOps] = useState<Set<string>>(new Set());
   const [draggedOpId, setDraggedOpId] = useState<string | null>(null);
 
+  // Only sync from server on initial load — don't overwrite local edits on refetch
+  const [initialLoaded, setInitialLoaded] = useState(false);
   useEffect(() => {
-    if (project?.data) {
+    if (project?.data && !initialLoaded) {
       const data = project.data as unknown as ProjectData;
       setLocalData({
         stock: { ...DEFAULT_PROJECT_DATA.stock, ...data.stock },
@@ -66,8 +68,9 @@ export default function ProjectEditor() {
         geometry: data.geometry,
         quantity: data.quantity || 1,
       });
+      setInitialLoaded(true);
     }
-  }, [project]);
+  }, [project, initialLoaded]);
 
   useEffect(() => {
     if (localData?.toolpath && localData.toolpath.length > 0) {
@@ -111,51 +114,118 @@ export default function ProjectEditor() {
   };
 
   const handleGenerate = async () => {
+    // Pre-generation summary
+    const opCount = localData.operations.length;
+    const toolChanges = new Set(localData.operations.map(op => op.toolNumber)).size;
+    const pointCount = localData.toolpath.length;
+
+    if (opCount === 0 && pointCount === 0) {
+      toast({ variant: "destructive", title: "Nothing to generate", description: "Import geometry or add operations first." });
+      return;
+    }
+
+    toast({
+      title: "Generating G-code...",
+      description: `${opCount} operations, ${toolChanges} tool changes, ${pointCount} toolpath points`,
+    });
+
     try {
       if (hasUnsavedChanges) {
         await handleSave();
       }
-      generateGCode.mutate(projectId);
-    } catch (error) {
-      // Save failed, don't generate
+      generateGCode.mutate(projectId, {
+        onSuccess: () => {
+          toast({ title: "G-code generated", description: `${opCount} operations processed successfully.` });
+        },
+        onError: (err: any) => {
+          toast({ variant: "destructive", title: "Generation failed", description: err.message });
+        },
+      });
+    } catch (error: any) {
+      toast({ variant: "destructive", title: "Save failed", description: error.message || "Could not save before generating." });
     }
   };
 
-  const handleImport = (geometry: ImportedGeometry, recommendedStock?: { diameter: number; length: number }) => {
-    // Use recommended stock dimensions if provided, otherwise keep current
+  const handleImport = async (geometry: ImportedGeometry, recommendedStock?: { diameter: number; length: number }) => {
     const stockDiameter = recommendedStock?.diameter ?? localData.stock.diameter;
     const stockLength = recommendedStock?.length ?? localData.stock.length;
-    
+
     const toolpath = geometryToToolpath(
       geometry,
       stockDiameter,
-      0,    // rotationStart
-      0,    // rotationEnd (0 for standard 2-axis turning)
-      1     // rotationSteps (1 for 2-axis turning, >1 for 4-axis)
+      0, 0, 1
     );
-    
+
+    // Auto-analyze geometry to suggest operations
+    let suggestedOps: Operation[] = [];
+    let analysisWarnings: string[] = [];
+    let estimatedTime = 0;
+    try {
+      const res = await fetch('/api/analyze-geometry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ geometry, material: localData.stock.material || 'oak' }),
+      });
+      if (res.ok) {
+        const analysis = await res.json();
+        suggestedOps = analysis.suggestedOperations || [];
+        analysisWarnings = analysis.warnings || [];
+        estimatedTime = analysis.estimatedCycleTime || 0;
+
+        // Use analysis stock recommendations if no manual override
+        if (!recommendedStock && analysis.recommendedStock) {
+          recommendedStock = {
+            diameter: analysis.recommendedStock.diameter,
+            length: analysis.recommendedStock.length,
+          };
+        }
+      }
+    } catch {
+      // Analysis failed — continue with basic import
+    }
+
+    const finalDiameter = recommendedStock?.diameter ?? stockDiameter;
+    const finalLength = recommendedStock?.length ?? stockLength;
+
     setLocalData(prev => prev ? ({
       ...prev,
       geometry,
       stock: {
         ...prev.stock,
-        diameter: stockDiameter,
-        length: stockLength,
+        diameter: finalDiameter,
+        length: finalLength,
+        type: suggestedOps.some(op => op.type === 'turning') ? 'round' : prev.stock.type,
       },
-      toolpath: toolpath.map((p, i) => ({ ...p, feedRate: prev.machineSettings.workFeed })),
+      toolpath: toolpath.map(p => ({ ...p, feedRate: prev.machineSettings.workFeed })),
+      operations: suggestedOps.length > 0 ? suggestedOps : prev.operations,
     }) : null);
-    
+
     setShowImporter(false);
     setHasUnsavedChanges(true);
-    
-    const stockInfo = recommendedStock 
-      ? ` Stock auto-sized to ${stockDiameter}mm x ${stockLength}mm.`
-      : '';
-    
-    toast({
-      title: "Geometry imported",
-      description: `Generated ${toolpath.length} toolpath points from ${geometry.sourceFile}.${stockInfo}`,
-    });
+
+    const parts: string[] = [];
+    parts.push(`${toolpath.length} toolpath points from ${geometry.sourceFile}`);
+    if (suggestedOps.length > 0) {
+      parts.push(`${suggestedOps.length} operations auto-detected`);
+    }
+    if (estimatedTime > 0) {
+      const mins = Math.floor(estimatedTime / 60);
+      const secs = estimatedTime % 60;
+      parts.push(`est. ${mins}m ${secs}s cycle time`);
+    }
+    parts.push(`Stock: ${finalDiameter}mm × ${finalLength}mm`);
+
+    toast({ title: "Geometry imported & analyzed", description: parts.join('. ') + '.' });
+
+    if (analysisWarnings.length > 0) {
+      setTimeout(() => {
+        toast({
+          variant: "destructive",
+          title: "Analysis warnings",
+          description: analysisWarnings.join('. '),
+        });
+      }, 1500);
+    }
   };
 
   const updateStock = (field: keyof typeof localData.stock, value: number | string) => {
@@ -1229,8 +1299,29 @@ export default function ProjectEditor() {
               </div>
             )}
           </div>
-          <div className="flex-1 bg-zinc-950 p-4 font-mono text-xs text-green-400 overflow-auto whitespace-pre">
-            {project.gcode || "(Click Generate to create G-code...)"}
+          <div className="flex-1 bg-zinc-950 p-4 font-mono text-xs overflow-auto">
+            {project.gcode ? (
+              project.gcode.split('\n').map((line, i) => {
+                const trimmed = line.trim();
+                let color = 'text-green-400'; // Default: cutting moves
+                if (trimmed.startsWith('G0 ') || trimmed.startsWith('G00') || (trimmed.startsWith('G0') && !trimmed.startsWith('G01') && !trimmed.startsWith('G02') && !trimmed.startsWith('G03'))) {
+                  color = 'text-red-400'; // Rapids in red
+                } else if (trimmed.startsWith('(')) {
+                  color = 'text-zinc-500'; // Comments dim
+                } else if (trimmed.startsWith('M') || trimmed.startsWith('T')) {
+                  color = 'text-yellow-400'; // M-codes and tool changes in yellow
+                } else if (trimmed.startsWith('G02') || trimmed.startsWith('G03') || trimmed.startsWith('G2 ') || trimmed.startsWith('G3 ')) {
+                  color = 'text-cyan-400'; // Arcs in cyan
+                } else if (trimmed.startsWith('G76') || trimmed.startsWith('G81') || trimmed.startsWith('G83')) {
+                  color = 'text-purple-400'; // Canned cycles in purple
+                } else if (trimmed === '' || trimmed.length === 0) {
+                  return <br key={i} />;
+                }
+                return <div key={i} className={color}>{line}</div>;
+              })
+            ) : (
+              <span className="text-zinc-500">(Import geometry → operations will be auto-detected → click Generate)</span>
+            )}
           </div>
         </aside>
       </div>
@@ -1240,37 +1331,61 @@ export default function ProjectEditor() {
 
 function checkCollisions(data: ProjectData): string[] {
   const warnings: string[] = [];
-  const { stock, toolpath } = data;
-  
-  if (!toolpath || toolpath.length === 0) return warnings;
+  const { stock, toolpath, geometry } = data;
 
-  // Machine coordinate system:
-  // Z0 = headstock/spindle face
-  // Negative Z = toward tailstock (safe cutting direction)
-  // Positive Z = behind headstock (collision zone!)
-  
-  for (let i = 0; i < toolpath.length; i++) {
-    const point = toolpath[i];
-    
-    // Check for tool going behind headstock (positive Z is dangerous)
-    if (point.z > 5) {
-      warnings.push(`Point ${i}: Tool behind headstock at Z=+${point.z.toFixed(1)}mm`);
+  // Check stock vs geometry fit
+  if (geometry?.boundingBox) {
+    const bbox = geometry.boundingBox;
+    const partMaxRadius = Math.max(
+      Math.abs(bbox.max.x), Math.abs(bbox.min.x),
+      Math.abs(bbox.max.y), Math.abs(bbox.min.y)
+    );
+    if (partMaxRadius * 2 > stock.diameter) {
+      warnings.push(`Part diameter (${(partMaxRadius * 2).toFixed(1)}mm) exceeds stock diameter (${stock.diameter}mm) — part will be clipped!`);
     }
-    
-    // Check for tool going beyond tailstock (past the stock length)
-    if (point.z < -(stock.length + 20)) {
-      warnings.push(`Point ${i}: Tool beyond tailstock at Z=${point.z.toFixed(1)}mm`);
-    }
-    
-    // Check for tool plunging into centerline (radius too small)
-    // Calculate radius - handles both 2-axis (y=0) and 4-axis (rotated x,y) data
-    const radius = Math.sqrt(point.x * point.x + point.y * point.y);
-    // Only warn if radius is very small AND it's not just a rotated coordinate
-    // For 4-axis data, check if this is a real small-radius cut vs rotation artifact
-    if (radius < 2 && point.z < 0 && Math.abs(point.a || 0) % 90 > 5) {
-      warnings.push(`Point ${i}: Tool near centerline (R=${radius.toFixed(1)}mm) at Z=${point.z.toFixed(1)}mm`);
+    const partLength = Math.abs(bbox.max.z - bbox.min.z);
+    if (partLength > stock.length) {
+      warnings.push(`Part length (${partLength.toFixed(1)}mm) exceeds stock length (${stock.length}mm)`);
     }
   }
+
+  // Machine limits
+  if (stock.diameter > 300) {
+    warnings.push(`Stock diameter (${stock.diameter}mm) exceeds machine max (300mm)`);
+  }
+  if (stock.length > 1500) {
+    warnings.push(`Stock length (${stock.length}mm) exceeds machine max (1500mm)`);
+  }
+
+  if (!toolpath || toolpath.length === 0) return warnings;
+
+  // Toolpath safety checks
+  let behindHeadstock = 0;
+  let beyondTailstock = 0;
+  let nearCenterline = 0;
+  let rapidThrough = 0;
+
+  for (let i = 0; i < toolpath.length; i++) {
+    const point = toolpath[i];
+
+    if (point.z > 5) behindHeadstock++;
+    if (point.z < -(stock.length + 20)) beyondTailstock++;
+
+    const radius = Math.sqrt(point.x * point.x + point.y * point.y);
+    if (radius < 2 && point.z < 0 && Math.abs(point.a || 0) % 90 > 5) {
+      nearCenterline++;
+    }
+
+    // Check for rapid moves through stock (rapid with small radius)
+    if (point.moveType === 'rapid' && radius < stock.diameter / 2 && point.z < 0 && point.z > -stock.length) {
+      rapidThrough++;
+    }
+  }
+
+  if (behindHeadstock > 0) warnings.push(`${behindHeadstock} points behind headstock (Z > 0) — collision risk`);
+  if (beyondTailstock > 0) warnings.push(`${beyondTailstock} points beyond tailstock — tool out of range`);
+  if (nearCenterline > 0) warnings.push(`${nearCenterline} points near centerline (R < 2mm) — tool crash risk`);
+  if (rapidThrough > 0) warnings.push(`${rapidThrough} rapid moves through stock — potential crash`);
 
   return warnings.slice(0, 10);
 }
