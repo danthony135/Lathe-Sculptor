@@ -1197,6 +1197,7 @@ export default function ProjectEditor() {
                 }}
                 className="flex-1"
                 importedGeometry={localData.geometry}
+                operations={localData.operations}
               />
             </>
           )}
