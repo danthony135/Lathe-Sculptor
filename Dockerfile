@@ -12,10 +12,10 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy package files first for better caching
-COPY package*.json ./
+COPY package.json package-lock.json ./
 
-# Install dependencies
-RUN npm ci --only=production=false
+# Install all dependencies (including devDependencies for build)
+RUN npm ci
 
 # Copy application code
 COPY . .
