@@ -21,6 +21,10 @@ const toolTypes = [
   { value: "sanding", label: "Sanding Tool" },
   { value: "routing", label: "Router Tool" },
   { value: "milling", label: "Milling Tool" },
+  { value: "planing", label: "Planer Blade" },
+  { value: "v_bit", label: "V-Bit (Engraving)" },
+  { value: "ball_nose", label: "Ball Nose End Mill" },
+  { value: "threading", label: "Threading Tool" },
 ];
 
 const ToolIcon = ({ type }: { type: string }) => {
@@ -54,6 +58,10 @@ function EditToolDialog({
   const [fluteLength, setFluteLength] = useState(params.fluteLength ?? 30);
   const [maxDepthOfCut, setMaxDepthOfCut] = useState(params.maxDepthOfCut ?? 5);
   const [flutes, setFlutes] = useState(params.flutes ?? 4);
+  const [offsetX, setOffsetX] = useState(params.offsets?.offsetX ?? 0);
+  const [offsetZ, setOffsetZ] = useState(params.offsets?.offsetZ ?? 0);
+  const [wearOffsetX, setWearOffsetX] = useState(params.offsets?.wearOffsetX ?? 0);
+  const [wearOffsetZ, setWearOffsetZ] = useState(params.offsets?.wearOffsetZ ?? 0);
 
   const handleSave = () => {
     updateTool.mutate({
@@ -72,6 +80,7 @@ function EditToolDialog({
           fluteLength,
           maxDepthOfCut,
           flutes,
+          offsets: { offsetX, offsetZ, wearOffsetX, wearOffsetZ },
         },
       },
     }, {
@@ -224,9 +233,32 @@ function EditToolDialog({
             )}
           </div>
 
-          <Button 
-            onClick={handleSave} 
-            disabled={updateTool.isPending} 
+          {/* Tool Offsets */}
+          <div className="border-t pt-4">
+            <Label className="text-xs font-semibold text-muted-foreground uppercase">Tool Offsets</Label>
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <div className="space-y-1">
+                <Label className="text-xs">Offset X (mm)</Label>
+                <Input type="number" step="0.001" value={offsetX} onChange={e => setOffsetX(parseFloat(e.target.value) || 0)} className="font-mono text-sm" />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Offset Z (mm)</Label>
+                <Input type="number" step="0.001" value={offsetZ} onChange={e => setOffsetZ(parseFloat(e.target.value) || 0)} className="font-mono text-sm" />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Wear X (mm)</Label>
+                <Input type="number" step="0.001" value={wearOffsetX} onChange={e => setWearOffsetX(parseFloat(e.target.value) || 0)} className="font-mono text-sm" />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Wear Z (mm)</Label>
+                <Input type="number" step="0.001" value={wearOffsetZ} onChange={e => setWearOffsetZ(parseFloat(e.target.value) || 0)} className="font-mono text-sm" />
+              </div>
+            </div>
+          </div>
+
+          <Button
+            onClick={handleSave}
+            disabled={updateTool.isPending}
             className="w-full mt-4"
             data-testid="button-save-tool"
           >

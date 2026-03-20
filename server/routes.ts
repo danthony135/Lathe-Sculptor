@@ -5,7 +5,9 @@ import { api } from "@shared/routes";
 import { z } from "zod";
 import { generateGCode, parseGCode } from "./gcode-generator";
 import { analyzeDxfFile, convertDxfToStl, convertDxfToStlWithFreeCAD } from "./cad-converter";
-import type { MachineConfig, SpindleConfig } from "@shared/schema";
+import { textToToolpath } from "./engraving-engine";
+import { extractTriangles, sampleSurface, generateFinishingToolpath, generateRoughingToolpath, generateSpiralFlutes, generateWrappedPattern, generateHelicalPath, convertToInverseTime } from "./toolpath-engine";
+import type { MachineConfig, SpindleConfig, ToolpathPoint, Carving3DParams } from "@shared/schema";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -185,6 +187,155 @@ export async function registerRoutes(
   app.delete(api.settings.delete.path, async (req, res) => {
     await storage.deleteSetting(req.params.key);
     res.status(204).send();
+  });
+
+  // ============================================================
+  // TOOLPATH GENERATION ENDPOINTS
+  // ============================================================
+
+  // Engraving: text → toolpath
+  app.post('/api/toolpath/engrave', async (req, res) => {
+    try {
+      const { text, fontSize, engravingDepth, startZ, stockRadius, fontPath } = req.body;
+      if (!text) return res.status(400).json({ message: 'Text is required' });
+
+      const toolpath = await textToToolpath({
+        text,
+        fontSize: fontSize || 10,
+        engravingDepth: engravingDepth || 1,
+        startZ: startZ || -20,
+        xOffset: stockRadius || 25,
+        fontPath,
+      });
+
+      res.json({ toolpath, count: toolpath.length });
+    } catch (err: any) {
+      console.error('Engraving error:', err);
+      res.status(500).json({ message: err.message || 'Failed to generate engraving toolpath' });
+    }
+  });
+
+  // 3D Carving: mesh → toolpath (roughing + finishing)
+  app.post('/api/toolpath/carve3d', async (req, res) => {
+    try {
+      const {
+        vertices, normals, indices,
+        toolRadius, scallopHeight, stepdown, strategy,
+        stockRadius, stockLength, feedRate,
+        finishAllowance, boundaryOffset,
+        zResolution, angleResolution,
+      } = req.body;
+
+      if (!vertices || !vertices.length) {
+        return res.status(400).json({ message: 'Mesh vertices required' });
+      }
+
+      // Extract triangles from mesh data
+      const triangles = extractTriangles(vertices, normals, indices);
+
+      // Sample the surface
+      const samples = sampleSurface(triangles, {
+        zResolution: zResolution || 2,
+        angleResolution: angleResolution || 5,
+        stockRadius: stockRadius || 50,
+        stockLength: stockLength || 200,
+      });
+
+      // Generate roughing toolpath
+      const roughingPath = generateRoughingToolpath(samples, {
+        toolRadius: toolRadius || 3,
+        stepdown: stepdown || 3,
+        stockRadius: stockRadius || 50,
+        stockLength: stockLength || 200,
+        safeRadius: (stockRadius || 50) + 10,
+        feedRate: feedRate || 300,
+        finishAllowance: finishAllowance || 0.5,
+      });
+
+      // Generate finishing toolpath
+      const finishingPath = generateFinishingToolpath(samples, {
+        strategy: strategy || 'raster',
+        toolRadius: toolRadius || 3,
+        scallopHeight: scallopHeight || 0.1,
+        stockRadius: stockRadius || 50,
+        stockLength: stockLength || 200,
+        safeRadius: (stockRadius || 50) + 10,
+        feedRate: feedRate || 200,
+        boundaryOffset: boundaryOffset || 2,
+      });
+
+      const toolpath = [...roughingPath, ...finishingPath];
+      res.json({ toolpath, count: toolpath.length, roughingCount: roughingPath.length, finishingCount: finishingPath.length });
+    } catch (err: any) {
+      console.error('3D carving error:', err);
+      res.status(500).json({ message: err.message || 'Failed to generate carving toolpath' });
+    }
+  });
+
+  // 4-Axis Contouring: pattern → toolpath
+  app.post('/api/toolpath/contour4axis', async (req, res) => {
+    try {
+      const { patternType, stockRadius, stockLength, toolRadius, feedRate } = req.body;
+
+      let toolpath: ToolpathPoint[] = [];
+
+      if (patternType === 'spiral_flute') {
+        const { fluteCount, helixAngle, fluteDepth, depthPerPass } = req.body;
+        toolpath = generateSpiralFlutes({
+          stockRadius: stockRadius || 25,
+          stockLength: stockLength || 200,
+          fluteCount: fluteCount || 4,
+          helixAngle: helixAngle || 45,
+          fluteDepth: fluteDepth || 5,
+          toolRadius: toolRadius || 3,
+          feedRate: feedRate || 200,
+          depthPerPass: depthPerPass || 2,
+          startZ: 0,
+          endZ: -(stockLength || 200),
+          safeRadius: (stockRadius || 25) + 10,
+        });
+      } else if (patternType === 'helical') {
+        const { pitch, depth, depthPerPass, direction } = req.body;
+        toolpath = generateHelicalPath({
+          stockRadius: stockRadius || 25,
+          stockLength: stockLength || 200,
+          pitch: pitch || 20,
+          depth: depth || 3,
+          toolRadius: toolRadius || 3,
+          feedRate: feedRate || 200,
+          depthPerPass: depthPerPass || 1,
+          startZ: 0,
+          endZ: -(stockLength || 200),
+          direction: direction || 'right',
+          safeRadius: (stockRadius || 25) + 10,
+        });
+      } else if (patternType === 'wrapped_pattern') {
+        const { pattern, startAngle, endAngle, engravingDepth } = req.body;
+        toolpath = generateWrappedPattern({
+          stockRadius: stockRadius || 25,
+          stockLength: stockLength || 200,
+          toolRadius: toolRadius || 1,
+          feedRate: feedRate || 300,
+          engravingDepth: engravingDepth || 1,
+          safeRadius: (stockRadius || 25) + 10,
+          pattern: pattern || [],
+          startAngle: startAngle || 0,
+          endAngle: endAngle || 360,
+          startZ: 0,
+          endZ: -(stockLength || 200),
+        });
+      }
+
+      // Convert to inverse time feed if requested
+      if (req.body.useInverseTime) {
+        toolpath = convertToInverseTime(toolpath, feedRate || 200, stockRadius || 25);
+      }
+
+      res.json({ toolpath, count: toolpath.length });
+    } catch (err: any) {
+      console.error('4-axis contouring error:', err);
+      res.status(500).json({ message: err.message || 'Failed to generate 4-axis toolpath' });
+    }
   });
 
   // CAD File Conversion API
