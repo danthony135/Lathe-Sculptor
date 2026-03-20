@@ -15,7 +15,7 @@ WORKDIR /app
 COPY . .
 
 # Install all dependencies (including devDependencies for build)
-RUN npm install --no-optional
+RUN npm install
 
 # Build the application
 RUN npm run build
