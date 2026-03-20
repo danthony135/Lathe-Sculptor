@@ -233,6 +233,43 @@ function EditToolDialog({
             )}
           </div>
 
+          {/* Feed/Speed Calculator */}
+          {(type === 'turning' || type === 'milling' || type === 'routing' || type === 'drilling' || type === 'ball_nose') && (
+            <div className="border-t pt-4">
+              <Label className="text-xs font-semibold text-muted-foreground uppercase">Feed/Speed Calculator</Label>
+              <div className="bg-muted/30 rounded p-3 mt-2 space-y-2">
+                {(() => {
+                  const d = diameter || 10;
+                  const rpm = type === 'turning' ? 2000 : 14000;
+                  const surfaceSpeed = (Math.PI * d * rpm) / 1000; // m/min
+                  const chipLoad = type === 'drilling' ? 0.1 : 0.15; // mm per tooth (wood)
+                  const flutesN = flutes || 2;
+                  const recommendedFeed = chipLoad * flutesN * rpm; // mm/min
+
+                  return (
+                    <>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <span className="text-muted-foreground">Surface speed:</span>
+                        <span className="font-mono">{surfaceSpeed.toFixed(0)} m/min</span>
+                        <span className="text-muted-foreground">Chipload (wood):</span>
+                        <span className="font-mono">{chipLoad} mm/tooth</span>
+                        <span className="text-muted-foreground">Suggested feed:</span>
+                        <span className="font-mono font-semibold text-primary">{Math.min(recommendedFeed, 2000).toFixed(0)} mm/min</span>
+                        <span className="text-muted-foreground">at {rpm} RPM:</span>
+                        <span className="font-mono">{flutesN} flutes × {chipLoad}mm</span>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground">
+                        {surfaceSpeed > 500 ? '⚠ High surface speed — reduce RPM for hardwoods' :
+                         surfaceSpeed < 50 ? '⚠ Low surface speed — increase RPM or use larger tool' :
+                         '✓ Surface speed in good range for wood'}
+                      </p>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+
           {/* Tool Offsets */}
           <div className="border-t pt-4">
             <Label className="text-xs font-semibold text-muted-foreground uppercase">Tool Offsets</Label>

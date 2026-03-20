@@ -20,6 +20,9 @@ import {
   Wrench, Settings2, Trash2, ChevronDown, ChevronUp, GripVertical
 } from "lucide-react";
 import type { ProjectData, ToolpathPoint, Operation, OperationType, ImportedGeometry, Tool } from "@shared/schema";
+import { AxisConfirmDialog } from "@/components/AxisConfirmDialog";
+import { DrillPatternEditor } from "@/components/DrillPatternEditor";
+import { GroovePatternEditor } from "@/components/GroovePatternEditor";
 import { useToast } from "@/hooks/use-toast";
 
 const DEFAULT_PROJECT_DATA: ProjectData = {
@@ -45,8 +48,40 @@ export default function ProjectEditor() {
   const { data: tools } = useTools();
   const { toast } = useToast();
 
-  const [localData, setLocalData] = useState<ProjectData | null>(null);
+  const [localData, setLocalDataRaw] = useState<ProjectData | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [undoStack, setUndoStack] = useState<ProjectData[]>([]);
+  const [redoStack, setRedoStack] = useState<ProjectData[]>([]);
+
+  // Wrapped setLocalData that pushes to undo stack
+  const setLocalData: typeof setLocalDataRaw = (updater) => {
+    setLocalDataRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      if (prev && next && prev !== next) {
+        setUndoStack(stack => [...stack.slice(-30), prev]); // Keep last 30 states
+        setRedoStack([]); // Clear redo on new change
+      }
+      return next;
+    });
+  };
+
+  const handleUndo = () => {
+    if (undoStack.length === 0) return;
+    const prev = undoStack[undoStack.length - 1];
+    setUndoStack(stack => stack.slice(0, -1));
+    setRedoStack(stack => [...stack, localData!]);
+    setLocalDataRaw(prev);
+    setHasUnsavedChanges(true);
+  };
+
+  const handleRedo = () => {
+    if (redoStack.length === 0) return;
+    const next = redoStack[redoStack.length - 1];
+    setRedoStack(stack => stack.slice(0, -1));
+    setUndoStack(stack => [...stack, localData!]);
+    setLocalDataRaw(next);
+    setHasUnsavedChanges(true);
+  };
   const [showImporter, setShowImporter] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [simulationProgress, setSimulationProgress] = useState(0);
@@ -54,6 +89,31 @@ export default function ProjectEditor() {
   const [collisionWarnings, setCollisionWarnings] = useState<string[]>([]);
   const [expandedOps, setExpandedOps] = useState<Set<string>>(new Set());
   const [draggedOpId, setDraggedOpId] = useState<string | null>(null);
+  const [pendingImport, setPendingImport] = useState<{
+    geometry: ImportedGeometry;
+    analysis: any;
+    toolpath: ToolpathPoint[];
+  } | null>(null);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        handleRedo();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (hasUnsavedChanges) handleSave();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  });
 
   // Only sync from server on initial load — don't overwrite local edits on refetch
   const [initialLoaded, setInitialLoaded] = useState(false);
@@ -150,16 +210,9 @@ export default function ProjectEditor() {
     const stockDiameter = recommendedStock?.diameter ?? localData.stock.diameter;
     const stockLength = recommendedStock?.length ?? localData.stock.length;
 
-    const toolpath = geometryToToolpath(
-      geometry,
-      stockDiameter,
-      0, 0, 1
-    );
+    const toolpath = geometryToToolpath(geometry, stockDiameter, 0, 0, 1);
 
-    // Auto-analyze geometry to suggest operations
-    let suggestedOps: Operation[] = [];
-    let analysisWarnings: string[] = [];
-    let estimatedTime = 0;
+    // Auto-analyze geometry
     try {
       const res = await fetch('/api/analyze-geometry', {
         method: 'POST',
@@ -168,24 +221,28 @@ export default function ProjectEditor() {
       });
       if (res.ok) {
         const analysis = await res.json();
-        suggestedOps = analysis.suggestedOperations || [];
-        analysisWarnings = analysis.warnings || [];
-        estimatedTime = analysis.estimatedCycleTime || 0;
-
-        // Use analysis stock recommendations if no manual override
-        if (!recommendedStock && analysis.recommendedStock) {
-          recommendedStock = {
-            diameter: analysis.recommendedStock.diameter,
-            length: analysis.recommendedStock.length,
-          };
-        }
+        // Show confirmation dialog with analysis results
+        setShowImporter(false);
+        setPendingImport({ geometry, analysis, toolpath });
+        return;
       }
     } catch {
-      // Analysis failed — continue with basic import
+      // Analysis failed — apply directly without dialog
     }
 
-    const finalDiameter = recommendedStock?.diameter ?? stockDiameter;
-    const finalLength = recommendedStock?.length ?? stockLength;
+    // Fallback: apply without analysis
+    applyImport(geometry, toolpath, null, recommendedStock);
+  };
+
+  const applyImport = (
+    geometry: ImportedGeometry,
+    toolpath: ToolpathPoint[],
+    analysis: any | null,
+    recommendedStock?: { diameter: number; length: number }
+  ) => {
+    const suggestedOps: Operation[] = analysis?.suggestedOperations || [];
+    const finalDiameter = analysis?.recommendedStock?.diameter ?? recommendedStock?.diameter ?? localData.stock.diameter;
+    const finalLength = analysis?.recommendedStock?.length ?? recommendedStock?.length ?? localData.stock.length;
 
     setLocalData(prev => prev ? ({
       ...prev,
@@ -194,37 +251,31 @@ export default function ProjectEditor() {
         ...prev.stock,
         diameter: finalDiameter,
         length: finalLength,
-        type: suggestedOps.some(op => op.type === 'turning') ? 'round' : prev.stock.type,
+        type: suggestedOps.some((op: Operation) => op.type === 'turning') ? 'round' : prev.stock.type,
       },
       toolpath: toolpath.map(p => ({ ...p, feedRate: prev.machineSettings.workFeed })),
       operations: suggestedOps.length > 0 ? suggestedOps : prev.operations,
     }) : null);
 
     setShowImporter(false);
+    setPendingImport(null);
     setHasUnsavedChanges(true);
 
     const parts: string[] = [];
-    parts.push(`${toolpath.length} toolpath points from ${geometry.sourceFile}`);
-    if (suggestedOps.length > 0) {
-      parts.push(`${suggestedOps.length} operations auto-detected`);
+    parts.push(`${toolpath.length} toolpath points`);
+    if (suggestedOps.length > 0) parts.push(`${suggestedOps.length} operations`);
+    if (analysis?.estimatedCycleTime) {
+      const m = Math.floor(analysis.estimatedCycleTime / 60);
+      const s = analysis.estimatedCycleTime % 60;
+      parts.push(`~${m}m ${s}s`);
     }
-    if (estimatedTime > 0) {
-      const mins = Math.floor(estimatedTime / 60);
-      const secs = estimatedTime % 60;
-      parts.push(`est. ${mins}m ${secs}s cycle time`);
-    }
-    parts.push(`Stock: ${finalDiameter}mm × ${finalLength}mm`);
+    parts.push(`Stock: ${finalDiameter}×${finalLength}mm`);
+    toast({ title: "Import applied", description: parts.join(' · ') });
 
-    toast({ title: "Geometry imported & analyzed", description: parts.join('. ') + '.' });
-
-    if (analysisWarnings.length > 0) {
+    if (analysis?.warnings?.length > 0) {
       setTimeout(() => {
-        toast({
-          variant: "destructive",
-          title: "Analysis warnings",
-          description: analysisWarnings.join('. '),
-        });
-      }, 1500);
+        toast({ variant: "destructive", title: "Warnings", description: analysis.warnings.join('. ') });
+      }, 1000);
     }
   };
 
@@ -437,13 +488,20 @@ export default function ProjectEditor() {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          <Button 
-            variant="outline" 
-            size="sm" 
+          <Button variant="ghost" size="sm" onClick={handleUndo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">
+            <RotateCcw className="w-4 h-4" />
+          </Button>
+          <Button variant="ghost" size="sm" onClick={handleRedo} disabled={redoStack.length === 0} title="Redo (Ctrl+Y)">
+            <RotateCcw className="w-4 h-4 -scale-x-100" />
+          </Button>
+          <div className="h-5 w-px bg-border" />
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => setShowImporter(true)}
             data-testid="button-import"
           >
-            <Upload className="w-4 h-4 mr-2" /> Import CAD
+            <Upload className="w-4 h-4 mr-2" /> Import
           </Button>
           <Button 
             variant="outline" 
@@ -873,6 +931,18 @@ export default function ProjectEditor() {
                                       </SelectContent>
                                     </Select>
                                   </div>
+                                  {/* Visual drill pattern editor */}
+                                  <div className="col-span-2">
+                                    <DrillPatternEditor
+                                      stockDiameter={localData.stock.diameter}
+                                      stockLength={localData.stock.length}
+                                      pattern={op.params.drilling?.holePattern || { type: 'single', positions: [{ x: 0, y: 0, z: -(localData.stock.length / 2) }] }}
+                                      onChange={(pattern) => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, drilling: { ...o.params.drilling!, holePattern: pattern } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }}
+                                    />
+                                  </div>
                                 </div>
                               )}
 
@@ -909,6 +979,20 @@ export default function ProjectEditor() {
                                         <SelectItem value="round">Round</SelectItem>
                                       </SelectContent>
                                     </Select>
+                                  </div>
+                                  {/* Visual groove position editor */}
+                                  <div className="col-span-2">
+                                    <GroovePatternEditor
+                                      stockDiameter={localData.stock.diameter}
+                                      stockLength={localData.stock.length}
+                                      grooveDepth={op.params.grooving?.grooveDepth || 5}
+                                      grooveWidth={op.params.grooving?.grooveWidth || 3}
+                                      zPositions={op.params.grooving?.zPositions || []}
+                                      onChange={(positions) => {
+                                        setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, grooving: { ...o.params.grooving!, zPositions: positions, grooveCount: positions.length } } } : o) }) : null);
+                                        setHasUnsavedChanges(true);
+                                      }}
+                                    />
                                   </div>
                                 </div>
                               )}
@@ -1325,6 +1409,19 @@ export default function ProjectEditor() {
           </div>
         </aside>
       </div>
+
+      {/* Axis orientation confirmation dialog */}
+      {pendingImport && (
+        <AxisConfirmDialog
+          open={!!pendingImport}
+          geometry={pendingImport.geometry}
+          analysis={pendingImport.analysis}
+          onConfirm={(analysis) => {
+            applyImport(pendingImport.geometry, pendingImport.toolpath, analysis);
+          }}
+          onCancel={() => setPendingImport(null)}
+        />
+      )}
     </div>
   );
 }

@@ -23,8 +23,28 @@ export default function Settings() {
     }
   }, [machineConfig]);
 
+  const validateMCode = (code: string): boolean => /^M\d{1,3}$/.test(code.trim());
+
   const handleSave = async () => {
     if (!config) return;
+
+    // Validate M-codes
+    const allMCodes = [
+      ...Object.values(config.loaderCodes),
+      ...Object.values(config.auxCodes),
+      config.postProcessor.programEnd,
+      ...config.spindles.flatMap(s => [s.mCodes.start, s.mCodes.stop, s.mCodes.reverse].filter(Boolean) as string[]),
+    ];
+    const invalidCodes = allMCodes.filter(c => c && !validateMCode(c));
+    if (invalidCodes.length > 0) {
+      toast({
+        variant: "destructive",
+        title: "Invalid M-codes",
+        description: `${invalidCodes.join(', ')} — M-codes must be M followed by 1-3 digits (e.g. M03, M76)`,
+      });
+      return;
+    }
+
     try {
       await updateSetting.mutateAsync({ key: "machine_config", value: config });
       toast({ title: "Settings saved", description: "Machine configuration updated." });

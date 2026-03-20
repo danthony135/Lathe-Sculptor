@@ -562,9 +562,20 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
         <div className="space-y-4 p-4">
           <div className="flex items-center gap-3">
             <FileType2 className="w-6 h-6 text-primary animate-pulse" />
-            <span className="text-sm">Processing file...</span>
+            <div>
+              <span className="text-sm font-medium">Processing file...</span>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {progress < 30 ? 'Reading file data...' :
+                 progress < 60 ? 'Parsing geometry entities...' :
+                 progress < 80 ? 'Calculating bounding box...' :
+                 'Adjusting to machine coordinates...'}
+              </p>
+            </div>
           </div>
           <Progress value={progress} className="h-2" />
+          <p className="text-xs text-muted-foreground text-center">
+            Large files may take a moment. The UI may briefly pause during complex geometry.
+          </p>
         </div>
       )}
 

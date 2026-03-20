@@ -1,4 +1,4 @@
-import { useRef, useState, useMemo } from 'react';
+import { useRef, useState, useMemo, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Grid, PerspectiveCamera, Line, Text } from '@react-three/drei';
 import * as THREE from 'three';
@@ -126,6 +126,16 @@ function Workpiece({
     latheGeometry.rotateZ(-Math.PI / 2);
     return latheGeometry;
   }, [toolpath, progress, stockDiameter, stockLength]);
+
+  // Dispose old geometry on update
+  const prevGeomRef = useRef<THREE.LatheGeometry | null>(null);
+  useEffect(() => {
+    if (prevGeomRef.current && prevGeomRef.current !== geometry) {
+      prevGeomRef.current.dispose();
+    }
+    prevGeomRef.current = geometry;
+    return () => { geometry?.dispose(); };
+  }, [geometry]);
 
   if (!geometry) return null;
 
@@ -550,6 +560,7 @@ function Tailstock({ stockLength }: { stockLength: number }) {
 
 function SimulationController({
   isSimulating,
+  toolpath,
   progress,
   onProgressChange,
   onComplete,
@@ -560,9 +571,24 @@ function SimulationController({
   onProgressChange: (p: number) => void;
   onComplete?: () => void;
 }) {
+  // Calculate total toolpath distance for timing-based simulation
+  const totalDistance = useMemo(() => {
+    let dist = 0;
+    for (let i = 1; i < toolpath.length; i++) {
+      const dx = toolpath[i].x - toolpath[i - 1].x;
+      const dy = toolpath[i].y - toolpath[i - 1].y;
+      const dz = toolpath[i].z - toolpath[i - 1].z;
+      dist += Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    return Math.max(dist, 1);
+  }, [toolpath]);
+
   useFrame((_, delta) => {
     if (isSimulating && progress < 1) {
-      const newProgress = Math.min(progress + delta * 0.1, 1);
+      // Speed: traverse ~200mm/s of toolpath (scaled for visualization)
+      const speed = 200;
+      const increment = (speed * delta) / totalDistance;
+      const newProgress = Math.min(progress + increment, 1);
       onProgressChange(newProgress);
       if (newProgress >= 1 && onComplete) {
         onComplete();
@@ -614,6 +640,11 @@ function ImportedMesh({
 
     return geometry;
   }, [importedGeometry, stockLength]);
+
+  // Dispose on unmount
+  useEffect(() => {
+    return () => { meshGeometry?.dispose(); };
+  }, [meshGeometry]);
 
   if (!meshGeometry) return null;
 
