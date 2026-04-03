@@ -270,13 +270,15 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
     
   // Apply scaling and then axis adjustment to get displayed geometry
   // This ensures dimensions are shown correctly after coordinate remapping
-  const displayedGeometry = importedFile 
+  // Recompute geometry + recommended stock whenever unit selection changes
+  const scaledAdjustment = importedFile
     ? (() => {
         const scaled = scaleGeometry(importedFile.rawGeometry, currentScaleFactor);
-        const { geometry: adjusted } = adjustGeometryToMachine(scaled);
-        return adjusted;
+        return adjustGeometryToMachine(scaled);
       })()
     : null;
+  const displayedGeometry = scaledAdjustment?.geometry ?? null;
+  const scaledRecommendedStock = scaledAdjustment?.adjustment.recommendedStock ?? null;
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -330,23 +332,44 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
         }
         
         setProgress(20);
-        const rawGeometry = extension === 'dwg' 
+        const rawGeometry = extension === 'dwg'
           ? await parseDwgFile(file)
           : await parseDxfFile(file);
         setProgress(60);
-        
+
+        // Auto-detect units from DXF header ($INSUNITS) or dimension heuristic
+        if (rawGeometry.detectedUnits && rawGeometry.detectedUnits !== 'mm') {
+          const unitMap: Record<string, UnitType> = {
+            inches: 'inches',
+            feet: 'custom', // feet → custom with scale 304.8
+            cm: 'cm',
+            meters: 'meters',
+          };
+          const mappedUnit = unitMap[rawGeometry.detectedUnits];
+          if (mappedUnit) {
+            setSelectedUnit(mappedUnit);
+            if (mappedUnit === 'custom' && rawGeometry.detectedUnits === 'feet') {
+              setCustomScale('304.8');
+            }
+            toast({
+              title: 'Units auto-detected',
+              description: `File appears to be in ${rawGeometry.detectedUnits} — unit selector updated automatically. Change it if this is wrong.`,
+            });
+          }
+        }
+
         // Store raw geometry - scaling will be applied dynamically based on unit selection
         const { geometry, adjustment } = adjustGeometryToMachine(rawGeometry);
         setProgress(80);
-        
+
         setImportedFile({ name: file.name, geometry, rawGeometry, adjustment });
         setProgress(100);
-        
+
         toast({
           title: 'File imported',
           description: `Found ${geometry.vertices.length} vertices. Select units and adjust scale if needed.`,
         });
-        
+
         if (adjustment.warnings.length > 0) {
           toast({
             variant: 'destructive',
@@ -631,7 +654,7 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
             </div>
           )}
 
-          {importedFile.adjustment?.recommendedStock && (
+          {scaledRecommendedStock && (
             <div className="p-3 bg-primary/5 border border-primary/20 rounded-lg">
               <div className="flex items-center gap-2 mb-2">
                 <Package className="w-4 h-4 text-primary" />
@@ -640,13 +663,13 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
               <div className="grid grid-cols-2 gap-4 text-center">
                 <div>
                   <div className="font-mono text-lg text-primary">
-                    {importedFile.adjustment.recommendedStock.diameter}
+                    {scaledRecommendedStock.diameter}
                   </div>
                   <div className="text-xs text-muted-foreground">Diameter (mm)</div>
                 </div>
                 <div>
                   <div className="font-mono text-lg text-primary">
-                    {importedFile.adjustment.recommendedStock.length}
+                    {scaledRecommendedStock.length}
                   </div>
                   <div className="text-xs text-muted-foreground">Length (mm)</div>
                 </div>

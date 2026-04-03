@@ -112,11 +112,13 @@ export function adjustGeometryToMachine(
   // Detect if this is a 2D profile (DXF Z is flat or nearly flat)
   const is2DProfile = dxfZSpan < 1;
   
-  // For 2D lathe profiles, detect which axis is length (the longer one)
-  // The shorter axis is the radius
+  // Track which DXF axis maps to length and radius
   let partLength: number;
   let partRadius: number;
-  let lengthAxisIsY = false; // Track which DXF axis is the length
+  let lengthAxisIsY = false; // Track which DXF axis is the length (for 2D profiles)
+  // For 3D geometry: which DXF axis is length and which is the primary radial axis
+  let dxfLengthAxis: 'x' | 'y' | 'z' = 'x';
+  let dxfRadialAxis: 'x' | 'y' | 'z' = 'z';
   
   if (is2DProfile) {
     // 2D profile: determine which axis is longer (that's the length)
@@ -132,17 +134,64 @@ export function adjustGeometryToMachine(
       partRadius = Math.max(Math.abs(bounds.max.y), Math.abs(bounds.min.y));
     }
   } else {
-    // 3D geometry: use DXF Z as length if it's the longest, otherwise use longest of X/Y
-    if (dxfZSpan >= dxfXSpan && dxfZSpan >= dxfYSpan) {
-      partLength = dxfZSpan;
-      partRadius = Math.max(dxfXSpan, dxfYSpan) / 2;
-    } else if (dxfXSpan >= dxfYSpan) {
-      partLength = dxfXSpan;
-      partRadius = Math.max(Math.abs(bounds.max.y), Math.abs(bounds.min.y));
+    // 3D geometry: detect which axes are radial vs length for a solid of revolution.
+    // Key heuristic: radial axes are centered on zero (min ≈ -max), meaning the part
+    // was modeled around the lathe centerline. The length axis is NOT centered — it
+    // typically starts near 0 and extends in one direction.
+    //
+    // Example: a turned leg might have:
+    //   X: -4.5 to 9.9 (length axis, not centered)
+    //   Y: -1.3 to 6.7 (not centered — off-axis profile or half-profile)
+    //   Z: -8.0 to 8.0 (centered on zero — this is the radial/diameter axis)
+
+    const centeredness = {
+      x: dxfXSpan > 0.1 ? Math.abs(bounds.max.x + bounds.min.x) / dxfXSpan : 1,
+      y: dxfYSpan > 0.1 ? Math.abs(bounds.max.y + bounds.min.y) / dxfYSpan : 1,
+      z: dxfZSpan > 0.1 ? Math.abs(bounds.max.z + bounds.min.z) / dxfZSpan : 1,
+    };
+    // A value near 0 means the axis is centered on zero (likely radial).
+    // A value near 1+ means it's offset from zero (likely the length axis).
+
+    type Axis = 'x' | 'y' | 'z';
+    const axes: { axis: Axis; span: number; centered: number }[] = [
+      { axis: 'x', span: dxfXSpan, centered: centeredness.x },
+      { axis: 'y', span: dxfYSpan, centered: centeredness.y },
+      { axis: 'z', span: dxfZSpan, centered: centeredness.z },
+    ];
+
+    // Identify radial axes: centered on zero (centeredness < 0.15)
+    const radialAxes = axes.filter(a => a.centered < 0.15 && a.span > 0.1);
+    const nonRadialAxes = axes.filter(a => a.centered >= 0.15 || a.span <= 0.1);
+
+    if (radialAxes.length >= 1 && nonRadialAxes.length >= 1) {
+      // Use the most off-center axis as length, largest radial axis as radius
+      const lengthAxisInfo = nonRadialAxes.sort((a, b) => b.span - a.span)[0];
+      const radiusAxisInfo = radialAxes.sort((a, b) => b.span - a.span)[0];
+
+      partLength = lengthAxisInfo.span;
+      partRadius = radiusAxisInfo.span / 2;
+      dxfLengthAxis = lengthAxisInfo.axis;
+      dxfRadialAxis = radiusAxisInfo.axis;
+      lengthAxisIsY = lengthAxisInfo.axis === 'y';
     } else {
-      lengthAxisIsY = true;
-      partLength = dxfYSpan;
-      partRadius = Math.max(Math.abs(bounds.max.x), Math.abs(bounds.min.x));
+      // Fallback: longest axis is length (original behavior)
+      if (dxfZSpan >= dxfXSpan && dxfZSpan >= dxfYSpan) {
+        partLength = dxfZSpan;
+        partRadius = Math.max(dxfXSpan, dxfYSpan) / 2;
+        dxfLengthAxis = 'z';
+        dxfRadialAxis = dxfXSpan >= dxfYSpan ? 'x' : 'y';
+      } else if (dxfXSpan >= dxfYSpan) {
+        partLength = dxfXSpan;
+        partRadius = Math.max(Math.abs(bounds.max.y), Math.abs(bounds.min.y));
+        dxfLengthAxis = 'x';
+        dxfRadialAxis = dxfYSpan >= dxfZSpan ? 'y' : 'z';
+      } else {
+        lengthAxisIsY = true;
+        partLength = dxfYSpan;
+        partRadius = Math.max(Math.abs(bounds.max.x), Math.abs(bounds.min.x));
+        dxfLengthAxis = 'y';
+        dxfRadialAxis = dxfXSpan >= dxfZSpan ? 'x' : 'z';
+      }
     }
   }
   
@@ -168,11 +217,17 @@ export function adjustGeometryToMachine(
         };
       }
     } else {
-      // 3D geometry: keep original mapping but translate Z to start at 0
+      // 3D geometry: remap DXF axes to machine axes based on detected length/radial axes
+      // Machine Z = length axis (0 to -length), Machine Y = primary radial, Machine X = secondary radial
+      const lengthVal = v[dxfLengthAxis];
+      const radialVal = v[dxfRadialAxis];
+      // The third axis (neither length nor primary radial)
+      const thirdAxis = (['x', 'y', 'z'] as const).find(a => a !== dxfLengthAxis && a !== dxfRadialAxis)!;
+      const thirdVal = v[thirdAxis];
       return {
-        x: v.x,
-        y: v.y,
-        z: v.z - bounds.max.z, // Shift so max Z becomes 0
+        x: thirdVal,                                          // Secondary radial → Machine X
+        y: radialVal,                                         // Primary radial → Machine Y (profile radius)
+        z: -(lengthVal - bounds.min[dxfLengthAxis]),          // Length → Machine Z (0 to -length)
       };
     }
   });
@@ -212,17 +267,19 @@ export function adjustGeometryToMachine(
         };
       }
     } else {
+      // 3D geometry: remap axes same as vertices
+      const thirdAxis = (['x', 'y', 'z'] as const).find(a => a !== dxfLengthAxis && a !== dxfRadialAxis)!;
       return {
         ...c,
         start: {
-          x: c.start.x,
-          y: c.start.y,
-          z: c.start.z - bounds.max.z,
+          x: c.start[thirdAxis],
+          y: c.start[dxfRadialAxis],
+          z: -(c.start[dxfLengthAxis] - bounds.min[dxfLengthAxis]),
         },
         end: {
-          x: c.end.x,
-          y: c.end.y,
-          z: c.end.z - bounds.max.z,
+          x: c.end[thirdAxis],
+          y: c.end[dxfRadialAxis],
+          z: -(c.end[dxfLengthAxis] - bounds.min[dxfLengthAxis]),
         },
       };
     }
@@ -253,7 +310,7 @@ export function adjustGeometryToMachine(
       ? { x: 0, y: 0, z: -bounds.min.y }
       : { x: 0, y: 0, z: -bounds.min.x };
   } else {
-    translation = { x: 0, y: 0, z: -bounds.max.z };
+    translation = { x: 0, y: 0, z: -bounds.min[dxfLengthAxis] };
   }
   
   // Round up to practical stock sizes with margin
@@ -297,9 +354,12 @@ export function adjustGeometryToMachine(
           tz = -(vx - bounds.min.x);
         }
       } else {
-        tx = vx;
-        ty = vy;
-        tz = vz - bounds.max.z;
+        // 3D geometry: remap axes same as vertex transformation
+        const vArr = { x: vx, y: vy, z: vz };
+        const thirdAxis = (['x', 'y', 'z'] as const).find(a => a !== dxfLengthAxis && a !== dxfRadialAxis)!;
+        tx = vArr[thirdAxis];
+        ty = vArr[dxfRadialAxis];
+        tz = -(vArr[dxfLengthAxis] - bounds.min[dxfLengthAxis]);
       }
       
       transformedMeshVerts.push(tx, ty, tz);
@@ -352,13 +412,85 @@ export interface ParsedDxf {
   };
 }
 
+/**
+ * Detect units from DXF $INSUNITS header variable.
+ * $INSUNITS values: 0=unitless, 1=inches, 2=feet, 4=mm, 5=cm, 6=meters
+ * Also checks $MEASUREMENT: 0=imperial, 1=metric
+ */
+function detectDxfUnits(text: string): ImportedGeometry['detectedUnits'] {
+  const lines = text.split(/\r?\n/).map(l => l.trim());
+
+  // Look for $INSUNITS in HEADER section
+  for (let i = 0; i < lines.length - 2; i++) {
+    if (lines[i] === '$INSUNITS') {
+      // Next group code should be 70, value is the unit code
+      for (let j = i + 1; j < Math.min(i + 6, lines.length - 1); j += 2) {
+        const code = parseInt(lines[j]);
+        if (code === 70) {
+          const unitCode = parseInt(lines[j + 1]);
+          switch (unitCode) {
+            case 1: return 'inches';
+            case 2: return 'feet';
+            case 4: return 'mm';
+            case 5: return 'cm';
+            case 6: return 'meters';
+            default: return null;
+          }
+        }
+        if (code === 9) break; // Hit next variable, stop
+      }
+    }
+  }
+
+  // Fallback: check $MEASUREMENT (0=imperial/inches, 1=metric/mm)
+  for (let i = 0; i < lines.length - 2; i++) {
+    if (lines[i] === '$MEASUREMENT') {
+      for (let j = i + 1; j < Math.min(i + 6, lines.length - 1); j += 2) {
+        const code = parseInt(lines[j]);
+        if (code === 70) {
+          const val = parseInt(lines[j + 1]);
+          return val === 0 ? 'inches' : val === 1 ? 'mm' : null;
+        }
+        if (code === 9) break;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Heuristic: if no $INSUNITS found, guess based on bounding box dimensions.
+ * Typical lathe parts: furniture legs 4-36", spindles 1-8" diameter.
+ * If max dimension is < 50, it's very likely inches (would be tiny in mm).
+ * If max dimension is > 100, it's likely mm already.
+ */
+function guessUnitsFromDimensions(bbox: { min: Point3D; max: Point3D }): ImportedGeometry['detectedUnits'] {
+  const xSpan = Math.abs(bbox.max.x - bbox.min.x);
+  const ySpan = Math.abs(bbox.max.y - bbox.min.y);
+  const zSpan = Math.abs(bbox.max.z - bbox.min.z);
+  const maxSpan = Math.max(xSpan, ySpan, zSpan);
+
+  // If all dimensions are very small, almost certainly inches
+  // An 8-inch leg = 8 units, a 36-inch table leg = 36 units
+  // In mm, even a small part would be 50+ mm
+  if (maxSpan > 0.5 && maxSpan < 50) {
+    return 'inches';
+  }
+
+  return null;
+}
+
 export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
   const text = await file.text();
   const parser = new DxfParser();
-  
+
+  // Detect units from DXF header before parsing geometry
+  const detectedUnits = detectDxfUnits(text);
+
   try {
     const dxf = parser.parseSync(text);
-    
+
     if (!dxf) {
       throw new Error('Invalid DXF file: Could not parse file');
     }
@@ -867,15 +999,21 @@ export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
       throw new Error(`No geometry extracted from DXF file. File contains ${allEntities.length} entities of types: ${typesList}. Supported types: LINE, ARC, CIRCLE, LWPOLYLINE, POLYLINE, SPLINE, ELLIPSE, 3DFACE. For 3DSOLID files, try exporting as STL or creating a 2D profile.`);
     }
 
+    const bbox = {
+      min: { x: minX, y: minY, z: minZ },
+      max: { x: maxX, y: maxY, z: maxZ },
+    };
+
+    // Use header units if found, otherwise guess from dimensions
+    const finalUnits = detectedUnits ?? guessUnitsFromDimensions(bbox);
+
     return {
       sourceFile: file.name,
       fileType: 'dxf',
       vertices,
       curves,
-      boundingBox: {
-        min: { x: minX, y: minY, z: minZ },
-        max: { x: maxX, y: maxY, z: maxZ },
-      },
+      boundingBox: bbox,
+      detectedUnits: finalUnits,
     };
   } catch (error) {
     throw new Error(`Failed to parse DXF: ${error instanceof Error ? error.message : 'Unknown error'}`);

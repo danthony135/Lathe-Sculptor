@@ -306,6 +306,9 @@ export interface ImportedGeometry {
     min: Point3D;
     max: Point3D;
   };
+  // Units detected from file header (e.g., DXF $INSUNITS)
+  // 1=inches, 2=feet, 4=mm, 5=cm, 6=meters — null if not detected
+  detectedUnits?: 'mm' | 'inches' | 'feet' | 'cm' | 'meters' | null;
   // For 3D mesh files (STL/OBJ)
   meshData?: {
     vertices: number[];  // Flat array of vertex positions [x1,y1,z1, x2,y2,z2, ...]

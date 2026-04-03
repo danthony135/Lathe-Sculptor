@@ -106,7 +106,7 @@ export function analyzeGeometry(
     z: Math.abs(bbox.max.z - bbox.min.z),
   };
 
-  const axisMapping = detectAxisMapping(spans);
+  const axisMapping = detectAxisMapping(spans, bbox);
 
   // Step 2: Classify shape
   const shapeResult = classifyShape(geometry, axisMapping);
@@ -179,9 +179,31 @@ export function analyzeGeometry(
 // AXIS MAPPING
 // ============================================================
 
-function detectAxisMapping(spans: { x: number; y: number; z: number }): { length: 'x' | 'y' | 'z'; radius: 'x' | 'y' | 'z' } {
-  // The longest axis is typically the workpiece length (Z on the lathe)
-  // The two shorter axes are radial (X/Y)
+function detectAxisMapping(
+  spans: { x: number; y: number; z: number },
+  bbox?: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } }
+): { length: 'x' | 'y' | 'z'; radius: 'x' | 'y' | 'z' } {
+  // For 3D solids of revolution, radial axes are centered on zero (min ≈ -max).
+  // The length axis is offset from zero. Use this to distinguish length from diameter.
+  if (bbox) {
+    type Axis = 'x' | 'y' | 'z';
+    const axes: { axis: Axis; span: number; centered: number }[] = (['x', 'y', 'z'] as Axis[]).map(a => ({
+      axis: a,
+      span: spans[a],
+      centered: spans[a] > 0.1 ? Math.abs(bbox.max[a] + bbox.min[a]) / spans[a] : 1,
+    }));
+
+    const radial = axes.filter(a => a.centered < 0.15 && a.span > 0.1);
+    const nonRadial = axes.filter(a => a.centered >= 0.15 || a.span <= 0.1);
+
+    if (radial.length >= 1 && nonRadial.length >= 1) {
+      const lengthAxis = nonRadial.sort((a, b) => b.span - a.span)[0];
+      const radiusAxis = radial.sort((a, b) => b.span - a.span)[0];
+      return { length: lengthAxis.axis, radius: radiusAxis.axis };
+    }
+  }
+
+  // Fallback: longest axis is length
   const sorted = Object.entries(spans).sort((a, b) => b[1] - a[1]) as [('x' | 'y' | 'z'), number][];
   return {
     length: sorted[0][0],
