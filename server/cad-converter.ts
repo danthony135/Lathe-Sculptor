@@ -43,6 +43,42 @@ export interface DxfAnalysis {
 }
 
 /**
+ * For a bounding box, determine which axis is part length vs diameter.
+ * Solids of revolution have radial axes centered on zero (min ≈ -max).
+ * The length axis is offset from zero.
+ */
+function detectLatheDimensions(
+  min: { x: number; y: number; z: number },
+  max: { x: number; y: number; z: number }
+): { length: number; diameter: number; lengthAxis: 'x' | 'y' | 'z' } {
+  type Axis = 'x' | 'y' | 'z';
+  const spans: Record<Axis, number> = {
+    x: max.x - min.x,
+    y: max.y - min.y,
+    z: max.z - min.z,
+  };
+
+  const axes: { axis: Axis; span: number; centered: number }[] = (['x', 'y', 'z'] as Axis[]).map(a => ({
+    axis: a,
+    span: spans[a],
+    centered: spans[a] > 0.1 ? Math.abs(max[a] + min[a]) / spans[a] : 1,
+  }));
+
+  const radial = axes.filter(a => a.centered < 0.15 && a.span > 0.1);
+  const nonRadial = axes.filter(a => a.centered >= 0.15 || a.span <= 0.1);
+
+  if (radial.length >= 1 && nonRadial.length >= 1) {
+    const lengthInfo = nonRadial.sort((a, b) => b.span - a.span)[0];
+    const radiusInfo = radial.sort((a, b) => b.span - a.span)[0];
+    return { length: lengthInfo.span, diameter: radiusInfo.span, lengthAxis: lengthInfo.axis };
+  }
+
+  // Fallback: longest axis is length
+  const sorted = [...axes].sort((a, b) => b.span - a.span);
+  return { length: sorted[0].span, diameter: sorted[1].span, lengthAxis: sorted[0].axis };
+}
+
+/**
  * Analyze a DXF file to determine its contents
  */
 export function analyzeDxfFile(dxfContent: string): DxfAnalysis {
@@ -196,29 +232,12 @@ export function generateApproximateMesh(
   resolution: number = 36
 ): string {
   const { min, max } = boundingBox;
-  
-  // Determine the axis orientation
-  const xSpan = max.x - min.x;
-  const ySpan = max.y - min.y;
-  const zSpan = max.z - min.z;
-  
-  // For lathe parts, assume the longest axis is the length
-  let length: number, radius: number;
-  let lengthAxis: 'x' | 'y' | 'z';
-  
-  if (ySpan >= xSpan && ySpan >= zSpan) {
-    lengthAxis = 'y';
-    length = ySpan;
-    radius = Math.max(xSpan, zSpan) / 2;
-  } else if (xSpan >= ySpan && xSpan >= zSpan) {
-    lengthAxis = 'x';
-    length = xSpan;
-    radius = Math.max(ySpan, zSpan) / 2;
-  } else {
-    lengthAxis = 'z';
-    length = zSpan;
-    radius = Math.max(xSpan, ySpan) / 2;
-  }
+
+  // Determine the axis orientation using centeredness heuristic
+  const dims = detectLatheDimensions(min, max);
+  const length = dims.length;
+  const radius = dims.diameter / 2;
+  const lengthAxis = dims.lengthAxis;
   
   // Generate a simple cylinder mesh as approximation
   const triangles: string[] = [];
@@ -391,24 +410,9 @@ export async function convertDxfToStl(dxfContent: string, filename: string): Pro
     };
   }
   
-  // Calculate dimensions
+  // Calculate dimensions using centeredness heuristic for solids of revolution
   const { min, max } = analysis.boundingBox;
-  const xSpan = max.x - min.x;
-  const ySpan = max.y - min.y;
-  const zSpan = max.z - min.z;
-  
-  // Determine orientation for lathe
-  let length: number, diameter: number;
-  if (ySpan >= xSpan && ySpan >= zSpan) {
-    length = ySpan;
-    diameter = Math.max(xSpan, zSpan);
-  } else if (xSpan >= ySpan && xSpan >= zSpan) {
-    length = xSpan;
-    diameter = Math.max(ySpan, zSpan);
-  } else {
-    length = zSpan;
-    diameter = Math.max(xSpan, ySpan);
-  }
+  const { length, diameter } = detectLatheDimensions(min, max);
   
   warnings.push(`Detected dimensions: Length=${length.toFixed(1)}mm, Diameter=${diameter.toFixed(1)}mm`);
   

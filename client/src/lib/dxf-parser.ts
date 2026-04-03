@@ -915,65 +915,73 @@ export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
       if (headerBounds) {
         // Header bounds extracted successfully
         
-        // Determine part orientation based on dimensions
+        // Determine part orientation using centeredness heuristic
+        // (radial axes are centered on zero for solids of revolution)
         const xSpan = headerBounds.max.x - headerBounds.min.x;
         const ySpan = headerBounds.max.y - headerBounds.min.y;
         const zSpan = headerBounds.max.z - headerBounds.min.z;
-        
-        // Part dimensions calculated
-        
-        // For lathe parts, the longest axis is typically the length
-        // The other two axes define the cross-section
-        let partLength: number;
-        let partRadius: number;
+
+        const hbCenteredness = {
+          x: xSpan > 0.1 ? Math.abs(headerBounds.max.x + headerBounds.min.x) / xSpan : 1,
+          y: ySpan > 0.1 ? Math.abs(headerBounds.max.y + headerBounds.min.y) / ySpan : 1,
+          z: zSpan > 0.1 ? Math.abs(headerBounds.max.z + headerBounds.min.z) / zSpan : 1,
+        };
+
+        type HBAxis = 'x' | 'y' | 'z';
+        const hbAxes: { axis: HBAxis; span: number; centered: number }[] = [
+          { axis: 'x', span: xSpan, centered: hbCenteredness.x },
+          { axis: 'y', span: ySpan, centered: hbCenteredness.y },
+          { axis: 'z', span: zSpan, centered: hbCenteredness.z },
+        ];
+
+        let partLengthLocal: number;
+        let partRadiusLocal: number;
         let lengthAxis: 'x' | 'y' | 'z';
-        
-        if (ySpan >= xSpan && ySpan >= zSpan) {
-          // Y is the length axis (most common for lathe exports)
-          lengthAxis = 'y';
-          partLength = ySpan;
-          partRadius = Math.max(xSpan, zSpan) / 2;
-        } else if (xSpan >= ySpan && xSpan >= zSpan) {
-          // X is the length axis
-          lengthAxis = 'x';
-          partLength = xSpan;
-          partRadius = Math.max(ySpan, zSpan) / 2;
+
+        const hbRadial = hbAxes.filter(a => a.centered < 0.15 && a.span > 0.1);
+        const hbNonRadial = hbAxes.filter(a => a.centered >= 0.15 || a.span <= 0.1);
+
+        if (hbRadial.length >= 1 && hbNonRadial.length >= 1) {
+          const lenInfo = hbNonRadial.sort((a, b) => b.span - a.span)[0];
+          const radInfo = hbRadial.sort((a, b) => b.span - a.span)[0];
+          lengthAxis = lenInfo.axis;
+          partLengthLocal = lenInfo.span;
+          partRadiusLocal = radInfo.span / 2;
         } else {
-          // Z is the length axis
-          lengthAxis = 'z';
-          partLength = zSpan;
-          partRadius = Math.max(xSpan, ySpan) / 2;
+          // Fallback: longest axis is length
+          const sorted = [...hbAxes].sort((a, b) => b.span - a.span);
+          lengthAxis = sorted[0].axis;
+          partLengthLocal = sorted[0].span;
+          partRadiusLocal = sorted[1].span / 2;
         }
-        
-        // Axis detection complete
         
         // Create a basic cylindrical profile from the bounds
         // This creates a simple turned profile that can be refined
         const numPoints = 50;
         for (let i = 0; i <= numPoints; i++) {
           const t = i / numPoints;
-          
+
           let point: Point3D;
           if (lengthAxis === 'y') {
             // Y is length: profile in X-Y plane
             point = {
-              x: partRadius, // Use max radius for now
-              y: headerBounds.min.y + t * partLength,
+              x: partRadiusLocal,
+              y: headerBounds.min.y + t * partLengthLocal,
               z: 0,
             };
           } else if (lengthAxis === 'x') {
             // X is length: profile in X-Y plane
             point = {
-              x: headerBounds.min.x + t * partLength,
-              y: partRadius,
+              x: headerBounds.min.x + t * partLengthLocal,
+              y: partRadiusLocal,
               z: 0,
             };
           } else {
             // Z is length
             point = {
-              x: partRadius,
+              x: partRadiusLocal,
               y: 0,
-              z: headerBounds.min.z + t * partLength,
+              z: headerBounds.min.z + t * partLengthLocal,
             };
           }
           

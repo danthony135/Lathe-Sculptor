@@ -15,6 +15,47 @@ import { useToast } from '@/hooks/use-toast';
  * Detects if a DXF file contains 3DSOLID entities (which require conversion)
  * Returns info about the solid if found
  */
+/**
+ * For a bounding box, determine which axis is the part length and which is the diameter.
+ * For solids of revolution (turned parts), radial axes are centered on zero (min ≈ -max).
+ * The length axis is NOT centered — it extends in one direction from the origin.
+ */
+function detectLengthAndDiameter(
+  min: { x: number; y: number; z: number },
+  max: { x: number; y: number; z: number }
+): { length: number; diameter: number } {
+  const xSpan = max.x - min.x;
+  const ySpan = max.y - min.y;
+  const zSpan = max.z - min.z;
+
+  // Check how centered each axis is on zero (0 = perfectly centered, 1+ = offset)
+  const centeredness = {
+    x: xSpan > 0.1 ? Math.abs(max.x + min.x) / xSpan : 1,
+    y: ySpan > 0.1 ? Math.abs(max.y + min.y) / ySpan : 1,
+    z: zSpan > 0.1 ? Math.abs(max.z + min.z) / zSpan : 1,
+  };
+
+  type Axis = 'x' | 'y' | 'z';
+  const axes: { axis: Axis; span: number; centered: number }[] = [
+    { axis: 'x', span: xSpan, centered: centeredness.x },
+    { axis: 'y', span: ySpan, centered: centeredness.y },
+    { axis: 'z', span: zSpan, centered: centeredness.z },
+  ];
+
+  const radialAxes = axes.filter(a => a.centered < 0.15 && a.span > 0.1);
+  const nonRadialAxes = axes.filter(a => a.centered >= 0.15 || a.span <= 0.1);
+
+  if (radialAxes.length >= 1 && nonRadialAxes.length >= 1) {
+    const lengthAxis = nonRadialAxes.sort((a, b) => b.span - a.span)[0];
+    const radiusAxis = radialAxes.sort((a, b) => b.span - a.span)[0];
+    return { length: lengthAxis.span, diameter: radiusAxis.span };
+  }
+
+  // Fallback: longest axis is length, next longest is diameter
+  const sorted = axes.sort((a, b) => b.span - a.span);
+  return { length: sorted[0].span, diameter: sorted[1].span };
+}
+
 async function detect3DSolid(file: File): Promise<{
   has3DSolid: boolean;
   bounds?: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } };
@@ -23,17 +64,17 @@ async function detect3DSolid(file: File): Promise<{
   try {
     const text = await file.text();
     const has3DSolid = text.includes('3DSOLID') || text.includes('AcDbModelerGeometry');
-    
+
     if (!has3DSolid) {
       return { has3DSolid: false };
     }
-    
+
     // Extract bounds from header if possible
     const lines = text.split(/\r?\n/).map(l => l.trim());
     let extMin = { x: 0, y: 0, z: 0 };
     let extMax = { x: 0, y: 0, z: 0 };
     let foundBounds = false;
-    
+
     for (let i = 0; i < lines.length - 1; i++) {
       if (lines[i] === '$EXTMIN') {
         for (let j = i + 1; j < Math.min(i + 20, lines.length - 1); j += 2) {
@@ -57,32 +98,17 @@ async function detect3DSolid(file: File): Promise<{
         }
       }
     }
-    
+
     if (foundBounds) {
-      const xSpan = extMax.x - extMin.x;
-      const ySpan = extMax.y - extMin.y;
-      const zSpan = extMax.z - extMin.z;
-      
-      // Determine length and diameter (longest axis is length)
-      let length: number, diameter: number;
-      if (ySpan >= xSpan && ySpan >= zSpan) {
-        length = ySpan;
-        diameter = Math.max(xSpan, zSpan);
-      } else if (xSpan >= ySpan && xSpan >= zSpan) {
-        length = xSpan;
-        diameter = Math.max(ySpan, zSpan);
-      } else {
-        length = zSpan;
-        diameter = Math.max(xSpan, ySpan);
-      }
-      
+      const dims = detectLengthAndDiameter(extMin, extMax);
+
       return {
         has3DSolid: true,
         bounds: { min: extMin, max: extMax },
-        estimatedDimensions: { length: Math.round(length * 10) / 10, diameter: Math.round(diameter * 10) / 10 }
+        estimatedDimensions: { length: Math.round(dims.length * 10) / 10, diameter: Math.round(dims.diameter * 10) / 10 }
       };
     }
-    
+
     return { has3DSolid: true };
   } catch (e) {
     console.error('Error detecting 3DSOLID:', e);
