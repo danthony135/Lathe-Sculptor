@@ -215,17 +215,31 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
           type: 'application/octet-stream'
         });
         
+        // Auto-detect units from the DXF header (passed through server)
+        if (result.detectedUnits && result.detectedUnits !== 'mm') {
+          const unitMap: Record<string, UnitType> = { inches: 'inches', feet: 'custom', cm: 'cm', meters: 'meters' };
+          const mapped = unitMap[result.detectedUnits];
+          if (mapped) {
+            setSelectedUnit(mapped);
+            if (mapped === 'custom' && result.detectedUnits === 'feet') setCustomScale('304.8');
+            toast({
+              title: 'Units auto-detected',
+              description: `File is in ${result.detectedUnits} — unit selector updated. Change it if this is wrong.`,
+            });
+          }
+        }
+
         // Show warning about approximation
         toast({
           title: 'File Converted',
           description: result.warnings?.join(' ') || 'Created cylindrical approximation from 3D solid bounds.',
         });
-        
+
         // Close dialog and process the converted file
         setShow3DSolidDialog(false);
         setPendingFile(null);
         setSolidInfo(null);
-        
+
         // Process the converted STL
         await processConvertedStl(stlFile, result.dimensions);
       } else {

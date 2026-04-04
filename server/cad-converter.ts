@@ -22,6 +22,7 @@ export interface ConversionResult {
   format?: 'stl' | 'obj';
   message: string;
   warnings?: string[];
+  detectedUnits?: 'inches' | 'mm' | 'feet' | 'cm' | 'meters';
   boundingBox?: {
     min: { x: number; y: number; z: number };
     max: { x: number; y: number; z: number };
@@ -40,6 +41,8 @@ export interface DxfAnalysis {
     max: { x: number; y: number; z: number };
   };
   acisData?: string[];
+  /** Detected units from $INSUNITS header: 1=inches, 4=mm, etc. */
+  detectedUnits?: 'inches' | 'mm' | 'feet' | 'cm' | 'meters';
 }
 
 /**
@@ -89,9 +92,10 @@ export function analyzeDxfFile(dxfContent: string): DxfAnalysis {
   let inEntities = false;
   let in3DSolid = false;
   
-  // Extract bounding box from header
+  // Extract bounding box and units from header
   let extMin: { x: number; y: number; z: number } | null = null;
   let extMax: { x: number; y: number; z: number } | null = null;
+  let detectedUnits: DxfAnalysis['detectedUnits'] = undefined;
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -139,13 +143,43 @@ export function analyzeDxfFile(dxfContent: string): DxfAnalysis {
         else if (code === 9) break;
       }
     }
+
+    // Detect $INSUNITS (1=inches, 2=feet, 4=mm, 5=cm, 6=meters)
+    if (line === '$INSUNITS') {
+      for (let j = i + 1; j < Math.min(i + 6, lines.length - 1); j += 2) {
+        const code = parseInt(lines[j]);
+        if (code === 70) {
+          const unitCode = parseInt(lines[j + 1]);
+          if (unitCode === 1) detectedUnits = 'inches';
+          else if (unitCode === 2) detectedUnits = 'feet';
+          else if (unitCode === 4) detectedUnits = 'mm';
+          else if (unitCode === 5) detectedUnits = 'cm';
+          else if (unitCode === 6) detectedUnits = 'meters';
+          break;
+        }
+        if (code === 9) break;
+      }
+    }
+
+    // Fallback: $MEASUREMENT (0=imperial, 1=metric)
+    if (line === '$MEASUREMENT' && !detectedUnits) {
+      for (let j = i + 1; j < Math.min(i + 6, lines.length - 1); j += 2) {
+        const code = parseInt(lines[j]);
+        if (code === 70) {
+          detectedUnits = parseInt(lines[j + 1]) === 0 ? 'inches' : 'mm';
+          break;
+        }
+        if (code === 9) break;
+      }
+    }
   }
-  
+
   return {
     has3DSolid,
     entityTypes: Array.from(entityTypes),
     boundingBox: extMin && extMax ? { min: extMin, max: extMax } : undefined,
     acisData: acisData.length > 0 ? acisData : undefined,
+    detectedUnits,
   };
 }
 
@@ -240,42 +274,47 @@ export function generateApproximateMesh(
   const lengthAxis = dims.lengthAxis;
   
   // Generate a simple cylinder mesh as approximation
+  // IMPORTANT: Center radial axes on zero (the lathe centerline).
+  // The original bounding box may have off-center radial axes, but a turned part
+  // is always symmetric around the spindle axis.
   const triangles: string[] = [];
-  const centerX = (min.x + max.x) / 2;
-  const centerY = (min.y + max.y) / 2;
-  const centerZ = (min.z + max.z) / 2;
-  
+
+  // Length axis keeps its original start/end positions.
+  // Radial axes are centered on zero (lathe centerline).
+  const lengthStart = min[lengthAxis];
+  const lengthEnd = max[lengthAxis];
+
   // Generate cylinder along the detected length axis
   for (let i = 0; i < resolution; i++) {
     const angle1 = (i / resolution) * Math.PI * 2;
     const angle2 = ((i + 1) / resolution) * Math.PI * 2;
-    
+
     const cos1 = Math.cos(angle1);
     const sin1 = Math.sin(angle1);
     const cos2 = Math.cos(angle2);
     const sin2 = Math.sin(angle2);
-    
+
     let v1: [number, number, number], v2: [number, number, number];
     let v3: [number, number, number], v4: [number, number, number];
-    
+
     if (lengthAxis === 'y') {
-      // Cylinder along Y axis
-      v1 = [centerX + radius * cos1, min.y, centerZ + radius * sin1];
-      v2 = [centerX + radius * cos2, min.y, centerZ + radius * sin2];
-      v3 = [centerX + radius * cos1, max.y, centerZ + radius * sin1];
-      v4 = [centerX + radius * cos2, max.y, centerZ + radius * sin2];
+      // Cylinder along Y axis, radial in X/Z centered on 0
+      v1 = [radius * cos1, lengthStart, radius * sin1];
+      v2 = [radius * cos2, lengthStart, radius * sin2];
+      v3 = [radius * cos1, lengthEnd,   radius * sin1];
+      v4 = [radius * cos2, lengthEnd,   radius * sin2];
     } else if (lengthAxis === 'x') {
-      // Cylinder along X axis
-      v1 = [min.x, centerY + radius * cos1, centerZ + radius * sin1];
-      v2 = [min.x, centerY + radius * cos2, centerZ + radius * sin2];
-      v3 = [max.x, centerY + radius * cos1, centerZ + radius * sin1];
-      v4 = [max.x, centerY + radius * cos2, centerZ + radius * sin2];
+      // Cylinder along X axis, radial in Y/Z centered on 0
+      v1 = [lengthStart, radius * cos1, radius * sin1];
+      v2 = [lengthStart, radius * cos2, radius * sin2];
+      v3 = [lengthEnd,   radius * cos1, radius * sin1];
+      v4 = [lengthEnd,   radius * cos2, radius * sin2];
     } else {
-      // Cylinder along Z axis
-      v1 = [centerX + radius * cos1, centerY + radius * sin1, min.z];
-      v2 = [centerX + radius * cos2, centerY + radius * sin2, min.z];
-      v3 = [centerX + radius * cos1, centerY + radius * sin1, max.z];
-      v4 = [centerX + radius * cos2, centerY + radius * sin2, max.z];
+      // Cylinder along Z axis, radial in X/Y centered on 0
+      v1 = [radius * cos1, radius * sin1, lengthStart];
+      v2 = [radius * cos2, radius * sin2, lengthStart];
+      v3 = [radius * cos1, radius * sin1, lengthEnd];
+      v4 = [radius * cos2, radius * sin2, lengthEnd];
     }
     
     // Normal for triangle 1 (v1, v2, v4)
@@ -300,46 +339,46 @@ export function generateApproximateMesh(
     triangles.push(`  endfacet`);
   }
   
-  // Add end caps
-  const capCenter1: [number, number, number] = lengthAxis === 'y' 
-    ? [centerX, min.y, centerZ]
-    : lengthAxis === 'x' 
-      ? [min.x, centerY, centerZ]
-      : [centerX, centerY, min.z];
-      
-  const capCenter2: [number, number, number] = lengthAxis === 'y' 
-    ? [centerX, max.y, centerZ]
-    : lengthAxis === 'x' 
-      ? [max.x, centerY, centerZ]
-      : [centerX, centerY, max.z];
-  
+  // Add end caps (radial axes centered on zero)
+  const capCenter1: [number, number, number] = lengthAxis === 'y'
+    ? [0, lengthStart, 0]
+    : lengthAxis === 'x'
+      ? [lengthStart, 0, 0]
+      : [0, 0, lengthStart];
+
+  const capCenter2: [number, number, number] = lengthAxis === 'y'
+    ? [0, lengthEnd, 0]
+    : lengthAxis === 'x'
+      ? [lengthEnd, 0, 0]
+      : [0, 0, lengthEnd];
+
   for (let i = 0; i < resolution; i++) {
     const angle1 = (i / resolution) * Math.PI * 2;
     const angle2 = ((i + 1) / resolution) * Math.PI * 2;
-    
+
     const cos1 = Math.cos(angle1);
     const sin1 = Math.sin(angle1);
     const cos2 = Math.cos(angle2);
     const sin2 = Math.sin(angle2);
-    
+
     let v1: [number, number, number], v2: [number, number, number];
     let v3: [number, number, number], v4: [number, number, number];
-    
+
     if (lengthAxis === 'y') {
-      v1 = [centerX + radius * cos1, min.y, centerZ + radius * sin1];
-      v2 = [centerX + radius * cos2, min.y, centerZ + radius * sin2];
-      v3 = [centerX + radius * cos1, max.y, centerZ + radius * sin1];
-      v4 = [centerX + radius * cos2, max.y, centerZ + radius * sin2];
+      v1 = [radius * cos1, lengthStart, radius * sin1];
+      v2 = [radius * cos2, lengthStart, radius * sin2];
+      v3 = [radius * cos1, lengthEnd,   radius * sin1];
+      v4 = [radius * cos2, lengthEnd,   radius * sin2];
     } else if (lengthAxis === 'x') {
-      v1 = [min.x, centerY + radius * cos1, centerZ + radius * sin1];
-      v2 = [min.x, centerY + radius * cos2, centerZ + radius * sin2];
-      v3 = [max.x, centerY + radius * cos1, centerZ + radius * sin1];
-      v4 = [max.x, centerY + radius * cos2, centerZ + radius * sin2];
+      v1 = [lengthStart, radius * cos1, radius * sin1];
+      v2 = [lengthStart, radius * cos2, radius * sin2];
+      v3 = [lengthEnd,   radius * cos1, radius * sin1];
+      v4 = [lengthEnd,   radius * cos2, radius * sin2];
     } else {
-      v1 = [centerX + radius * cos1, centerY + radius * sin1, min.z];
-      v2 = [centerX + radius * cos2, centerY + radius * sin2, min.z];
-      v3 = [centerX + radius * cos1, centerY + radius * sin1, max.z];
-      v4 = [centerX + radius * cos2, centerY + radius * sin2, max.z];
+      v1 = [radius * cos1, radius * sin1, lengthStart];
+      v2 = [radius * cos2, radius * sin2, lengthStart];
+      v3 = [radius * cos1, radius * sin1, lengthEnd];
+      v4 = [radius * cos2, radius * sin2, lengthEnd];
     }
     
     // Bottom cap
@@ -448,6 +487,7 @@ export async function convertDxfToStl(dxfContent: string, filename: string): Pro
     format: 'stl',
     message: `Successfully converted ${filename} to STL (cylindrical approximation)`,
     warnings,
+    detectedUnits: analysis.detectedUnits,
     boundingBox: analysis.boundingBox,
     dimensions: { length, diameter },
   };

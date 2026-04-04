@@ -399,6 +399,7 @@ export async function registerRoutes(
           format: result.format,
           message: result.message,
           warnings: result.warnings,
+          detectedUnits: result.detectedUnits,
           boundingBox: result.boundingBox,
           dimensions: result.dimensions,
         });
