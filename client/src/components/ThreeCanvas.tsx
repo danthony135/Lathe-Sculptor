@@ -11,12 +11,16 @@ interface ThreeCanvasProps {
   isSimulating: boolean;
   simulationProgress: number;
   onSimulationComplete?: () => void;
+  /** Throttled live progress while simulating (drives the editor's slider) */
+  onProgressUpdate?: (p: number) => void;
   className?: string;
   importedGeometry?: ImportedGeometry;
   operations?: Operation[];
 }
 
-// Convert machine coordinates to scene coordinates
+// Convert machine coordinates to scene coordinates.
+// Machine: X = radial, Y = vertical, Z = along bed (0 at spindle, negative
+// toward tailstock). Scene: X = along bed (headstock at 0), Y = up, Z = radial.
 function toScene(machineX: number, machineY: number, machineZ: number): [number, number, number] {
   return [
     -machineZ,
@@ -25,12 +29,74 @@ function toScene(machineX: number, machineY: number, machineZ: number): [number,
   ];
 }
 
-// Convert with A-axis rotation
+// Convert with A-axis rotation about the spindle axis (scene X).
+// Matches the mesh rotation direction (rotation.x = +A): a right-handed
+// rotation about +X takes +Y toward +Z. The previous version rotated the
+// opposite way, so wrapped features displayed mirrored against the part.
 function toSceneWithRotation(machineX: number, machineY: number, machineZ: number, machineA: number): [number, number, number] {
   const angleRad = (machineA * Math.PI) / 180;
-  const rotatedY = machineX * Math.sin(angleRad) + machineY * Math.cos(angleRad);
-  const rotatedZ = machineX * Math.cos(angleRad) - machineY * Math.sin(angleRad);
+  const rotatedY = machineY * Math.cos(angleRad) - machineX * Math.sin(angleRad);
+  const rotatedZ = machineX * Math.cos(angleRad) + machineY * Math.sin(angleRad);
   return [-machineZ, rotatedY, rotatedZ];
+}
+
+// ============================================================
+// DISTANCE-BASED PROGRESS
+// ============================================================
+
+/**
+ * Cumulative XYZ distance at each toolpath point. The simulation advances
+ * progress as a fraction of total distance, so rendering must interpret it
+ * the same way — index-based lookup made the tool sprint through long moves
+ * and crawl through dense ones.
+ */
+function cumulativeDistances(toolpath: ToolpathPoint[]): number[] {
+  const cum: number[] = new Array(toolpath.length).fill(0);
+  for (let i = 1; i < toolpath.length; i++) {
+    const dx = toolpath[i].x - toolpath[i - 1].x;
+    const dy = toolpath[i].y - toolpath[i - 1].y;
+    const dz = toolpath[i].z - toolpath[i - 1].z;
+    cum[i] = cum[i - 1] + Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
+  return cum;
+}
+
+/** Interpolated position along the path at a distance fraction [0..1] */
+function interpolateAlongPath(
+  toolpath: ToolpathPoint[],
+  cum: number[],
+  progress: number
+): { point: ToolpathPoint; index: number } {
+  const n = toolpath.length;
+  if (n === 0) return { point: { x: 0, y: 0, z: 0, a: 0 }, index: 0 };
+  if (n === 1 || progress <= 0) return { point: toolpath[0], index: 0 };
+
+  const total = cum[n - 1] || 1;
+  const target = Math.min(progress, 1) * total;
+
+  // Binary search for the segment containing the target distance
+  let lo = 0, hi = n - 1;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid] <= target) lo = mid;
+    else hi = mid;
+  }
+
+  const p0 = toolpath[lo];
+  const p1 = toolpath[hi];
+  const segLen = cum[hi] - cum[lo];
+  const t = segLen > 0.0001 ? (target - cum[lo]) / segLen : 1;
+
+  return {
+    point: {
+      x: p0.x + (p1.x - p0.x) * t,
+      y: p0.y + (p1.y - p0.y) * t,
+      z: p0.z + (p1.z - p0.z) * t,
+      a: (p0.a || 0) + ((p1.a || 0) - (p0.a || 0)) * t,
+      moveType: p1.moveType,
+    },
+    index: hi,
+  };
 }
 
 // ============================================================
@@ -76,21 +142,27 @@ function Stock({
 
 function Workpiece({
   toolpath,
-  progress,
+  visibleCount,
   stockDiameter,
   stockLength,
-  currentRotation
+  currentRotation,
+  spinning,
 }: {
   toolpath: ToolpathPoint[];
-  progress: number;
+  visibleCount: number;
   stockDiameter: number;
   stockLength: number;
   currentRotation: number;
+  spinning: boolean;
 }) {
   const meshRef = useRef<THREE.Mesh>(null);
 
-  useFrame(() => {
-    if (meshRef.current) {
+  useFrame((_, delta) => {
+    if (!meshRef.current) return;
+    if (spinning) {
+      // Cosmetic spindle rotation during turning simulation (~90 RPM visual)
+      meshRef.current.rotation.x += delta * Math.PI * 3;
+    } else {
       meshRef.current.rotation.x = (currentRotation * Math.PI) / 180;
     }
   });
@@ -98,7 +170,7 @@ function Workpiece({
   const geometry = useMemo(() => {
     if (toolpath.length < 2) return null;
 
-    const visiblePoints = toolpath.slice(0, Math.floor(toolpath.length * progress) + 1);
+    const visiblePoints = toolpath.slice(0, Math.max(visibleCount, 1) + 1);
     if (visiblePoints.length < 2) return null;
 
     const profileMap = new Map<number, number>();
@@ -125,7 +197,7 @@ function Workpiece({
     const latheGeometry = new THREE.LatheGeometry(lathePoints, 64, 0, Math.PI * 2);
     latheGeometry.rotateZ(-Math.PI / 2);
     return latheGeometry;
-  }, [toolpath, progress, stockDiameter, stockLength]);
+  }, [toolpath, visibleCount, stockDiameter, stockLength]);
 
   // Dispose old geometry on update
   const prevGeomRef = useRef<THREE.LatheGeometry | null>(null);
@@ -150,210 +222,273 @@ function Workpiece({
 // TYPE-SPECIFIC TOOL MODELS
 // ============================================================
 
-const TOOL_COLORS = {
-  body: '#4a90d9',
-  shank: '#666666',
-  insert: '#b8860b',
-  sanding: '#c19a6b',
-  drill: '#708090',
-  vbit: '#b0c4de',
-  ballnose: '#6495ed',
-  planer: '#a0522d',
-  threading: '#cd853f',
-};
+// All tool models are built in a local Y-up frame with the CUTTING TIP AT
+// THE ORIGIN and the shank/holder extending in +Y. ToolVisual then orients
+// the whole model to match how the tool actually mounts on the machine:
+// lathe-type tools (knife, parting, threading, drill, sander) come at the
+// part radially, spindle-type tools (router, V-bit, ball nose, planer)
+// hang above it.
 
-function TurningToolModel({ scale = 1 }: { scale?: number }) {
+const STEEL = { color: '#8a8f98', metalness: 0.9, roughness: 0.35 };
+const HOLDER = { color: '#3d4450', metalness: 0.7, roughness: 0.5 };
+const CARBIDE = { color: '#c9a227', metalness: 0.8, roughness: 0.25 };
+const HSS = { color: '#b8bec9', metalness: 0.95, roughness: 0.2 };
+
+/** HSS turning knife: block holder, rectangular tool bit, ground tip wedge */
+function TurningToolModel({ noseAngle = 55 }: { noseAngle?: number }) {
+  const half = (noseAngle / 2) * (Math.PI / 180);
   return (
-    <group scale={[scale, scale, scale]}>
-      {/* Holder bar */}
-      <mesh position={[0, 12, 0]}>
-        <boxGeometry args={[6, 20, 6]} />
-        <meshStandardMaterial color={TOOL_COLORS.shank} metalness={0.9} roughness={0.3} />
+    <group>
+      {/* Tool block clamped in the turret */}
+      <mesh position={[0, 26, 0]}>
+        <boxGeometry args={[14, 18, 14]} />
+        <meshStandardMaterial {...HOLDER} />
       </mesh>
-      {/* Diamond insert */}
-      <mesh position={[0, 0, 0]} rotation={[0, Math.PI / 4, 0]}>
-        <boxGeometry args={[5, 2, 5]} />
-        <meshStandardMaterial color={TOOL_COLORS.insert} metalness={0.7} roughness={0.2} />
+      {/* Clamp screws */}
+      {[-4, 4].map(x => (
+        <mesh key={x} position={[x, 26, 7.2]} rotation={[Math.PI / 2, 0, 0]}>
+          <cylinderGeometry args={[1.4, 1.4, 1.5, 12]} />
+          <meshStandardMaterial {...STEEL} />
+        </mesh>
+      ))}
+      {/* Rectangular tool bit */}
+      <mesh position={[0, 10, 0]}>
+        <boxGeometry args={[5, 16, 8]} />
+        <meshStandardMaterial {...HSS} />
+      </mesh>
+      {/* Ground cutting wedge narrowing to the tip at the origin */}
+      <mesh position={[0, 1.5, 0]} rotation={[0, 0, 0]}>
+        <cylinderGeometry args={[0.3, 4 * Math.tan(half) + 1, 5, 4]} />
+        <meshStandardMaterial {...HSS} />
       </mesh>
     </group>
   );
 }
 
-function DrillToolModel({ diameter = 10, scale = 1 }: { diameter?: number; scale?: number }) {
-  const r = (diameter / 2) * scale;
+/** Parting / grooving blade: tall thin blade in a block holder */
+function GroovingToolModel({ cutWidth = 3 }: { cutWidth?: number }) {
+  const w = Math.max(cutWidth, 1.5);
   return (
-    <group scale={[scale, scale, scale]}>
+    <group>
+      <mesh position={[0, 28, 0]}>
+        <boxGeometry args={[14, 16, 14]} />
+        <meshStandardMaterial {...HOLDER} />
+      </mesh>
+      {/* Thin parting blade — narrow across the part axis */}
+      <mesh position={[0, 11, 0]}>
+        <boxGeometry args={[w, 22, 10]} />
+        <meshStandardMaterial {...HSS} />
+      </mesh>
+      {/* Carbide tip at the origin */}
+      <mesh position={[0, 0.75, 0]}>
+        <boxGeometry args={[w + 0.4, 1.5, 3]} />
+        <meshStandardMaterial {...CARBIDE} />
+      </mesh>
+    </group>
+  );
+}
+
+/** Threading tool: block holder with a 60° V insert pointing at the work */
+function ThreadingToolModel({ threadAngle = 60 }: { threadAngle?: number }) {
+  const half = (threadAngle / 2) * (Math.PI / 180);
+  const h = 6;
+  return (
+    <group>
+      <mesh position={[0, 24, 0]}>
+        <boxGeometry args={[14, 16, 14]} />
+        <meshStandardMaterial {...HOLDER} />
+      </mesh>
+      <mesh position={[0, 11, 0]}>
+        <boxGeometry args={[6, 12, 9]} />
+        <meshStandardMaterial {...STEEL} />
+      </mesh>
+      {/* V-profile insert, apex at the origin (4-sided cone = pyramid) */}
+      <mesh position={[0, h / 2, 0]} rotation={[Math.PI, 0, 0]}>
+        <coneGeometry args={[h * Math.tan(half), h, 4]} />
+        <meshStandardMaterial {...CARBIDE} />
+      </mesh>
+    </group>
+  );
+}
+
+/** Twist drill: chuck, shank, fluted body, 118° point at the origin */
+function DrillToolModel({ diameter = 10, pointAngle = 118 }: { diameter?: number; pointAngle?: number }) {
+  const r = Math.max(diameter / 2, 1.5);
+  const tipH = r / Math.tan((pointAngle / 2) * (Math.PI / 180));
+  return (
+    <group>
+      {/* Chuck */}
+      <mesh position={[0, tipH + 34, 0]}>
+        <cylinderGeometry args={[r + 4, r + 5.5, 14, 24]} />
+        <meshStandardMaterial {...HOLDER} />
+      </mesh>
+      {/* Fluted body — slightly stepped to suggest flutes */}
+      <mesh position={[0, tipH + 14, 0]}>
+        <cylinderGeometry args={[r, r, 28, 24]} />
+        <meshStandardMaterial {...STEEL} />
+      </mesh>
+      {[0, 120, 240].map(a => (
+        <mesh key={a} position={[0, tipH + 14, 0]} rotation={[0, (a * Math.PI) / 180, 0]}>
+          <boxGeometry args={[r * 0.35, 28, r * 2.02]} />
+          <meshStandardMaterial color="#5b626e" metalness={0.85} roughness={0.3} />
+        </mesh>
+      ))}
+      {/* 118° point, apex at the origin */}
+      <mesh position={[0, tipH / 2, 0]} rotation={[Math.PI, 0, 0]}>
+        <coneGeometry args={[r, tipH, 24]} />
+        <meshStandardMaterial {...HSS} />
+      </mesh>
+    </group>
+  );
+}
+
+/** Router bit / end mill: collet nut, shank, fluted cutter, flat end at origin */
+function EndMillModel({ diameter = 10 }: { diameter?: number }) {
+  const r = Math.max(diameter / 2, 1.5);
+  return (
+    <group>
+      {/* Collet nut */}
+      <mesh position={[0, 36, 0]}>
+        <cylinderGeometry args={[r + 3.5, r + 4.5, 10, 6]} />
+        <meshStandardMaterial {...HOLDER} />
+      </mesh>
       {/* Shank */}
-      <mesh position={[0, 20, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[r * 0.8, r * 0.8, 25, 16]} />
-        <meshStandardMaterial color={TOOL_COLORS.shank} metalness={0.9} roughness={0.3} />
+      <mesh position={[0, 25, 0]}>
+        <cylinderGeometry args={[r * 0.85, r * 0.85, 14, 20]} />
+        <meshStandardMaterial {...STEEL} />
       </mesh>
-      {/* Fluted body */}
-      <mesh position={[0, 5, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[r * 0.3, r, 15, 16]} />
-        <meshStandardMaterial color={TOOL_COLORS.drill} metalness={0.8} roughness={0.2} />
+      {/* Fluted cutting section down to the origin */}
+      <mesh position={[0, 9, 0]}>
+        <cylinderGeometry args={[r, r, 18, 20]} />
+        <meshStandardMaterial color="#4a6f9e" metalness={0.85} roughness={0.25} />
       </mesh>
-      {/* Point */}
-      <mesh position={[0, -3, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <coneGeometry args={[r * 0.3, 4, 16]} />
-        <meshStandardMaterial color={TOOL_COLORS.drill} metalness={0.8} roughness={0.2} />
-      </mesh>
-    </group>
-  );
-}
-
-function EndMillModel({ diameter = 10, scale = 1 }: { diameter?: number; scale?: number }) {
-  const r = (diameter / 2) * scale;
-  return (
-    <group scale={[scale, scale, scale]}>
-      {/* Shank */}
-      <mesh position={[0, 22, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[r * 0.8, r * 0.8, 20, 16]} />
-        <meshStandardMaterial color={TOOL_COLORS.shank} metalness={0.9} roughness={0.3} />
-      </mesh>
-      {/* Fluted cutting section */}
-      <mesh position={[0, 8, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[r, r, 16, 16]} />
-        <meshStandardMaterial color={TOOL_COLORS.body} metalness={0.8} roughness={0.2} />
-      </mesh>
-    </group>
-  );
-}
-
-function BallNoseModel({ diameter = 6, scale = 1 }: { diameter?: number; scale?: number }) {
-  const r = (diameter / 2) * scale;
-  return (
-    <group scale={[scale, scale, scale]}>
-      {/* Shank */}
-      <mesh position={[0, 22, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[r * 0.8, r * 0.8, 20, 16]} />
-        <meshStandardMaterial color={TOOL_COLORS.shank} metalness={0.9} roughness={0.3} />
-      </mesh>
-      {/* Cylinder body */}
-      <mesh position={[0, 8, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[r, r, 12, 16]} />
-        <meshStandardMaterial color={TOOL_COLORS.ballnose} metalness={0.8} roughness={0.2} />
-      </mesh>
-      {/* Ball tip */}
-      <mesh position={[0, 1, 0]}>
-        <sphereGeometry args={[r, 16, 16, 0, Math.PI * 2, 0, Math.PI / 2]} />
-        <meshStandardMaterial color={TOOL_COLORS.ballnose} metalness={0.8} roughness={0.2} />
-      </mesh>
-    </group>
-  );
-}
-
-function VBitModel({ angle = 60, scale = 1 }: { angle?: number; scale?: number }) {
-  const tipHalf = (angle / 2) * (Math.PI / 180);
-  const topR = 5 * Math.tan(tipHalf) * scale;
-  return (
-    <group scale={[scale, scale, scale]}>
-      {/* Shank */}
-      <mesh position={[0, 22, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[4, 4, 20, 16]} />
-        <meshStandardMaterial color={TOOL_COLORS.shank} metalness={0.9} roughness={0.3} />
-      </mesh>
-      {/* V-shaped tip */}
-      <mesh position={[0, 5, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <coneGeometry args={[topR, 12, 16]} />
-        <meshStandardMaterial color={TOOL_COLORS.vbit} metalness={0.8} roughness={0.2} />
-      </mesh>
-    </group>
-  );
-}
-
-function SandingToolModel({ width = 50, scale = 1 }: { width?: number; scale?: number }) {
-  return (
-    <group scale={[scale, scale, scale]}>
-      {/* Mounting arm */}
-      <mesh position={[0, 20, 0]}>
-        <boxGeometry args={[6, 15, 6]} />
-        <meshStandardMaterial color={TOOL_COLORS.shank} metalness={0.8} roughness={0.3} />
-      </mesh>
-      {/* Sanding paddle */}
-      <mesh position={[0, 5, 0]}>
-        <boxGeometry args={[width * 0.3, 8, 15]} />
-        <meshStandardMaterial color={TOOL_COLORS.sanding} roughness={0.9} metalness={0.1} />
-      </mesh>
-    </group>
-  );
-}
-
-function PlanerToolModel({ scale = 1 }: { scale?: number }) {
-  return (
-    <group scale={[scale, scale, scale]}>
-      {/* Spindle housing */}
-      <mesh position={[0, 25, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[8, 8, 20, 16]} />
-        <meshStandardMaterial color={TOOL_COLORS.shank} metalness={0.8} roughness={0.3} />
-      </mesh>
-      {/* Planer disc */}
-      <mesh position={[0, 10, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[15, 15, 4, 32]} />
-        <meshStandardMaterial color={TOOL_COLORS.planer} metalness={0.7} roughness={0.3} />
-      </mesh>
-      {/* Blade inserts */}
-      {[0, 90, 180, 270].map((angle) => (
-        <mesh key={angle} position={[Math.cos(angle * Math.PI / 180) * 13, 10, Math.sin(angle * Math.PI / 180) * 13]}>
-          <boxGeometry args={[4, 2, 1]} />
-          <meshStandardMaterial color={TOOL_COLORS.insert} metalness={0.9} roughness={0.1} />
+      {/* Flute grooves */}
+      {[0, 90, 180, 270].map(a => (
+        <mesh key={a} position={[0, 9, 0]} rotation={[0, (a * Math.PI) / 180, 0.35]}>
+          <boxGeometry args={[r * 0.3, 18, r * 2.02]} />
+          <meshStandardMaterial color="#334f73" metalness={0.85} roughness={0.3} />
         </mesh>
       ))}
     </group>
   );
 }
 
-function GroovingToolModel({ scale = 1 }: { scale?: number }) {
+/** Ball nose cutter: like an end mill but with a hemispherical tip */
+function BallNoseModel({ diameter = 6 }: { diameter?: number }) {
+  const r = Math.max(diameter / 2, 1.5);
   return (
-    <group scale={[scale, scale, scale]}>
-      {/* Holder */}
-      <mesh position={[0, 15, 0]}>
-        <boxGeometry args={[6, 20, 6]} />
-        <meshStandardMaterial color={TOOL_COLORS.shank} metalness={0.9} roughness={0.3} />
+    <group>
+      <mesh position={[0, 34 + r, 0]}>
+        <cylinderGeometry args={[r + 3.5, r + 4.5, 10, 6]} />
+        <meshStandardMaterial {...HOLDER} />
       </mesh>
-      {/* Thin blade */}
-      <mesh position={[0, 0, 0]}>
-        <boxGeometry args={[1.5, 8, 8]} />
-        <meshStandardMaterial color={TOOL_COLORS.insert} metalness={0.8} roughness={0.2} />
+      <mesh position={[0, 22 + r, 0]}>
+        <cylinderGeometry args={[r * 0.9, r * 0.9, 16, 20]} />
+        <meshStandardMaterial {...STEEL} />
+      </mesh>
+      {/* Cutter body */}
+      <mesh position={[0, 7 + r, 0]}>
+        <cylinderGeometry args={[r, r, 14, 20]} />
+        <meshStandardMaterial color="#4a6f9e" metalness={0.85} roughness={0.25} />
+      </mesh>
+      {/* Hemispherical tip touching the origin */}
+      <mesh position={[0, r, 0]}>
+        <sphereGeometry args={[r, 20, 16]} />
+        <meshStandardMaterial color="#4a6f9e" metalness={0.85} roughness={0.25} />
       </mesh>
     </group>
   );
 }
 
-function ThreadingToolModel({ scale = 1 }: { scale?: number }) {
+/** V-carving bit: shank with a conical point, apex at the origin */
+function VBitModel({ angle = 60 }: { angle?: number }) {
+  const half = (angle / 2) * (Math.PI / 180);
+  const h = 10;
+  const topR = h * Math.tan(half);
   return (
-    <group scale={[scale, scale, scale]}>
-      {/* Holder */}
-      <mesh position={[0, 15, 0]}>
-        <boxGeometry args={[6, 20, 6]} />
-        <meshStandardMaterial color={TOOL_COLORS.shank} metalness={0.9} roughness={0.3} />
+    <group>
+      <mesh position={[0, h + 26, 0]}>
+        <cylinderGeometry args={[topR + 2.5, topR + 3.5, 10, 6]} />
+        <meshStandardMaterial {...HOLDER} />
       </mesh>
-      {/* V-shaped threading insert */}
-      <mesh position={[0, 0, 0]} rotation={[0, 0, Math.PI / 4]}>
-        <boxGeometry args={[4, 2, 4]} />
-        <meshStandardMaterial color={TOOL_COLORS.threading} metalness={0.8} roughness={0.2} />
+      <mesh position={[0, h + 12, 0]}>
+        <cylinderGeometry args={[Math.max(topR * 0.7, 3), Math.max(topR * 0.7, 3), 18, 20]} />
+        <meshStandardMaterial {...STEEL} />
+      </mesh>
+      {/* Conical cutting point */}
+      <mesh position={[0, h / 2, 0]} rotation={[Math.PI, 0, 0]}>
+        <coneGeometry args={[topR, h, 24]} />
+        <meshStandardMaterial {...HSS} />
       </mesh>
     </group>
   );
 }
+
+/** Sanding paddle: arm with a flat abrasive pad, pad face at the origin */
+function SandingToolModel({ width = 50 }: { width?: number }) {
+  const w = Math.min(Math.max(width * 0.5, 15), 40);
+  return (
+    <group>
+      {/* Mounting arm */}
+      <mesh position={[0, 22, 0]}>
+        <boxGeometry args={[8, 24, 8]} />
+        <meshStandardMaterial {...HOLDER} />
+      </mesh>
+      {/* Pad backing plate */}
+      <mesh position={[0, 6, 0]}>
+        <boxGeometry args={[w, 4, 20]} />
+        <meshStandardMaterial color="#2e343d" metalness={0.5} roughness={0.6} />
+      </mesh>
+      {/* Abrasive pad face */}
+      <mesh position={[0, 2, 0]}>
+        <boxGeometry args={[w, 4, 20]} />
+        <meshStandardMaterial color="#c19a6b" roughness={1} metalness={0} />
+      </mesh>
+    </group>
+  );
+}
+
+/** Planer head: horizontal cutter drum with straight knives, spinning above the part */
+function PlanerToolModel({ width = 60 }: { width?: number }) {
+  const drumR = 12;
+  const len = Math.min(Math.max(width, 40), 90);
+  return (
+    <group>
+      {/* Motor housing */}
+      <mesh position={[0, drumR * 2 + 16, 0]}>
+        <boxGeometry args={[len * 0.7, 18, 22]} />
+        <meshStandardMaterial {...HOLDER} />
+      </mesh>
+      {/* Cutter drum — axis along the part (local X), knives at the bottom */}
+      <mesh position={[0, drumR, 0]} rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[drumR, drumR, len, 24]} />
+        <meshStandardMaterial {...STEEL} />
+      </mesh>
+      {/* Straight knives along the drum */}
+      {[0, 120, 240].map(a => {
+        const rad = (a * Math.PI) / 180;
+        return (
+          <mesh key={a} position={[0, drumR + Math.sin(rad) * (drumR - 0.5), Math.cos(rad) * (drumR - 0.5)]} rotation={[rad, 0, 0]}>
+            <boxGeometry args={[len - 4, 1, 4]} />
+            <meshStandardMaterial {...CARBIDE} />
+          </mesh>
+        );
+      })}
+    </group>
+  );
+}
+
+/** Tool types that mount radially (come at the part from the front like a
+ * lathe cross-slide) vs spindle tools that hang above the part */
+const RADIAL_TOOL_TYPES = new Set(['turning', 'grooving', 'parting', 'threading', 'drilling', 'boring', 'sanding']);
 
 function ToolVisual({
   position,
-  rotation,
   tool
 }: {
   position: [number, number, number];
-  rotation: number;
   tool?: Tool;
 }) {
-  const toolRef = useRef<THREE.Group>(null);
-
-  useFrame(() => {
-    if (toolRef.current) {
-      toolRef.current.rotation.x = (rotation * Math.PI) / 180;
-    }
-  });
-
   const toolType = tool?.type || 'turning';
   const params = (tool?.params || {}) as Record<string, any>;
   const diameter = params.diameter || 10;
@@ -361,11 +496,13 @@ function ToolVisual({
   const renderTool = () => {
     switch (toolType) {
       case 'turning':
-        return <TurningToolModel />;
+        return <TurningToolModel noseAngle={params.noseAngle || 55} />;
       case 'drilling':
-        return <DrillToolModel diameter={diameter} />;
+      case 'boring':
+        return <DrillToolModel diameter={diameter} pointAngle={params.pointAngle || 118} />;
       case 'milling':
       case 'routing':
+      case 'engraving':
         return <EndMillModel diameter={diameter} />;
       case 'ball_nose':
         return <BallNoseModel diameter={diameter} />;
@@ -374,31 +511,25 @@ function ToolVisual({
       case 'sanding':
         return <SandingToolModel width={params.width || 50} />;
       case 'planing':
-        return <PlanerToolModel />;
+        return <PlanerToolModel width={params.width || 60} />;
       case 'grooving':
       case 'parting':
-        return <GroovingToolModel />;
+        return <GroovingToolModel cutWidth={params.cutWidth || 3} />;
       case 'threading':
-        return <ThreadingToolModel />;
+        return <ThreadingToolModel threadAngle={params.threadAngle || 60} />;
       default:
-        // Fallback: generic cone + cylinder
-        return (
-          <>
-            <mesh rotation={[Math.PI / 2, 0, 0]}>
-              <coneGeometry args={[diameter / 2, diameter * 2, 16]} />
-              <meshStandardMaterial color={TOOL_COLORS.body} metalness={0.8} roughness={0.2} />
-            </mesh>
-            <mesh position={[0, diameter * 1.5, 0]} rotation={[Math.PI / 2, 0, 0]}>
-              <cylinderGeometry args={[diameter / 3, diameter / 3, diameter * 2, 16]} />
-              <meshStandardMaterial color={TOOL_COLORS.shank} metalness={0.9} roughness={0.3} />
-            </mesh>
-          </>
-        );
+        return <TurningToolModel />;
     }
   };
 
+  // Radial tools: rotate the Y-up model so the shank points away from the
+  // spindle axis (+Z in the scene, toward the viewer). Spindle tools keep
+  // the shank pointing up. The tool does NOT rotate with the A-axis — on
+  // this machine the workpiece spins, the tool stays put.
+  const radial = RADIAL_TOOL_TYPES.has(toolType);
+
   return (
-    <group ref={toolRef} position={position}>
+    <group position={position} rotation={radial ? [Math.PI / 2, 0, 0] : [0, 0, 0]}>
       {renderTool()}
     </group>
   );
@@ -408,42 +539,17 @@ function ToolVisual({
 // MULTI-COLOR TOOLPATH
 // ============================================================
 
-// Color palette for operations
-const OP_COLORS = [
-  '#00ff00', // green - roughing
-  '#ff6600', // orange - turning
-  '#00ccff', // cyan - finishing
-  '#ffcc00', // yellow - sanding
-  '#ff00ff', // magenta - milling
-  '#ff3333', // red - drilling
-  '#33ff99', // mint - grooving
-  '#9966ff', // purple - threading
-  '#ff9999', // pink - planing
-  '#66ffcc', // teal - engraving
-  '#ccff33', // lime - 3D carving
-  '#ff66cc', // hot pink - 4-axis
-  '#3399ff', // blue - routing
-];
-
-function getToolpathColor(moveType?: string): string {
-  if (moveType === 'rapid') return '#ff0000';
-  return '#00ff00';
-}
-
 function MultiColorToolpath({
   points,
-  progress,
-  operations
+  visibleCount,
 }: {
   points: ToolpathPoint[];
-  progress: number;
-  operations?: Operation[];
+  visibleCount: number;
 }) {
   const segments = useMemo(() => {
     if (points.length < 2) return [];
 
-    const visibleCount = Math.floor(points.length * progress) + 1;
-    const visiblePoints = points.slice(0, visibleCount);
+    const visiblePoints = points.slice(0, Math.max(visibleCount, 1) + 1);
     if (visiblePoints.length < 2) return [];
 
     // Build segments: rapid moves in red, cutting moves in green (or op-colored)
@@ -476,7 +582,7 @@ function MultiColorToolpath({
     }
 
     return result;
-  }, [points, progress, operations]);
+  }, [points, visibleCount]);
 
   return (
     <>
@@ -629,14 +735,28 @@ function ImportedMesh({
       geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     }
 
+    // Apply the same machine → scene axis remap used for the stock and
+    // toolpath (sceneX = -machineZ, sceneY = machineY, sceneZ = machineX).
+    // Without this the part renders 90° off-axis against its own stock.
+    const remap = new THREE.Matrix4().set(
+      0, 0, -1, 0,
+      0, 1, 0, 0,
+      1, 0, 0, 0,
+      0, 0, 0, 1
+    );
+    geometry.applyMatrix4(remap);
+
     geometry.computeBoundingBox();
     const bbox = geometry.boundingBox;
     if (bbox) {
+      // Center the part on the spindle axis and align it with the stock,
+      // which spans scene X 0..stockLength
       const centerX = (bbox.max.x + bbox.min.x) / 2;
       const centerY = (bbox.max.y + bbox.min.y) / 2;
       const centerZ = (bbox.max.z + bbox.min.z) / 2;
       geometry.translate(-centerX + stockLength / 2, -centerY, -centerZ);
     }
+    geometry.computeVertexNormals();
 
     return geometry;
   }, [importedGeometry, stockLength]);
@@ -673,6 +793,7 @@ export function ThreeCanvas({
   isSimulating,
   simulationProgress,
   onSimulationComplete,
+  onProgressUpdate,
   className,
   importedGeometry,
   operations,
@@ -689,17 +810,44 @@ export function ThreeCanvas({
 
   const progress = isSimulating ? internalProgress : simulationProgress;
 
-  const currentPoint = useMemo(() => {
-    if (toolpath.length === 0) return { x: stock.diameter + 20, y: 0, z: 0, a: 0 };
-    const idx = Math.min(Math.floor(toolpath.length * progress), toolpath.length - 1);
-    return toolpath[idx] || toolpath[0];
-  }, [toolpath, progress, stock.diameter]);
+  // Distance-based interpolation: constant tool speed along the path,
+  // and the reveal index matches how SimulationController advances progress
+  const cumDist = useMemo(() => cumulativeDistances(toolpath), [toolpath]);
 
-  const toolPosition = toSceneWithRotation(
-    currentPoint.x + 30,
+  const { currentPoint, visibleCount } = useMemo(() => {
+    if (toolpath.length === 0) {
+      return { currentPoint: { x: stock.diameter + 20, y: 0, z: 0, a: 0 }, visibleCount: 0 };
+    }
+    const { point, index } = interpolateAlongPath(toolpath, cumDist, progress);
+    return { currentPoint: point, visibleCount: index };
+  }, [toolpath, cumDist, progress, stock.diameter]);
+
+  // Report live progress to the parent (throttled to whole percent) so the
+  // editor's progress slider tracks the simulation instead of sitting at 0
+  const lastReportedRef = useRef(-1);
+  const handleInternalProgress = (p: number) => {
+    setInternalProgress(p);
+    const pct = Math.floor(p * 100);
+    if (onProgressUpdate && pct !== lastReportedRef.current) {
+      lastReportedRef.current = pct;
+      onProgressUpdate(p);
+    }
+  };
+
+  // The tool sits at a fixed angular station — the WORKPIECE rotates, the
+  // tool does not orbit it. Tip exactly at the programmed contact point.
+  const toolPosition = toScene(
+    currentPoint.x,
     currentPoint.y,
-    currentPoint.z,
-    currentPoint.a || 0
+    currentPoint.z
+  );
+
+  // Turning paths carry no A data (the spindle just spins) — give the
+  // workpiece a cosmetic spin while simulating. Paths that position the
+  // A-axis (carving, indexing, engraving) drive the rotation directly.
+  const hasAAxisMoves = useMemo(
+    () => toolpath.some(p => Math.abs(p.a || 0) > 0.01),
+    [toolpath]
   );
 
   return (
@@ -721,7 +869,7 @@ export function ThreeCanvas({
         <pointLight position={[-50, 50, 50]} intensity={0.5} />
 
         <Stock
-          stockType={stock.type || 'square'}
+          stockType={stock.type || 'round'}
           diameter={stock.diameter}
           width={stock.width}
           height={stock.height}
@@ -734,26 +882,25 @@ export function ThreeCanvas({
 
         {toolpath.length > 0 && (
           <>
-            {stock.type === 'round' && (
-              <Workpiece
-                toolpath={toolpath}
-                progress={progress}
-                stockDiameter={stock.diameter}
-                stockLength={stock.length}
-                currentRotation={currentPoint.a}
-              />
-            )}
+            {/* Turned result — shown for square stock too, since turning a
+                square blank round is a normal job on this machine */}
+            <Workpiece
+              toolpath={toolpath}
+              visibleCount={visibleCount}
+              stockDiameter={stock.diameter}
+              stockLength={stock.length}
+              currentRotation={currentPoint.a || 0}
+              spinning={isSimulating && !hasAAxisMoves}
+            />
             <MultiColorToolpath
               points={toolpath}
-              progress={progress}
-              operations={operations}
+              visibleCount={visibleCount}
             />
           </>
         )}
 
         <ToolVisual
           position={toolPosition}
-          rotation={currentPoint.a}
           tool={currentTool}
         />
 
@@ -784,8 +931,11 @@ export function ThreeCanvas({
           isSimulating={isSimulating}
           toolpath={toolpath}
           progress={internalProgress}
-          onProgressChange={setInternalProgress}
-          onComplete={onSimulationComplete}
+          onProgressChange={handleInternalProgress}
+          onComplete={() => {
+            onProgressUpdate?.(1);
+            onSimulationComplete?.();
+          }}
         />
       </Canvas>
     </div>

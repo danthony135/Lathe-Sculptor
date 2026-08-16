@@ -26,7 +26,7 @@ import { GroovePatternEditor } from "@/components/GroovePatternEditor";
 import { useToast } from "@/hooks/use-toast";
 
 const DEFAULT_PROJECT_DATA: ProjectData = {
-  stock: { type: 'square', diameter: 50, width: 50, height: 50, length: 200, zOffset: 0, material: 'oak' },
+  stock: { type: 'round', diameter: 50, width: 50, height: 50, length: 200, zOffset: 0, material: 'oak' },
   toolpath: [],
   operations: [],
   machineSettings: {
@@ -1364,6 +1364,7 @@ export default function ProjectEditor() {
                   setIsSimulating(false);
                   toast({ title: "Simulation complete" });
                 }}
+                onProgressUpdate={(p) => setSimulationProgress(p)}
                 className="flex-1"
                 importedGeometry={localData.geometry}
                 operations={localData.operations}
