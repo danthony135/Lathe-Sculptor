@@ -8,6 +8,7 @@ import { analyzeDxfFile, convertDxfToStl, convertDxfToStlWithFreeCAD } from "./c
 import { textToToolpath } from "./engraving-engine";
 import { analyzeGeometry } from "./geometry-analyzer";
 import { extractTriangles, sampleSurface, generateFinishingToolpath, generateRoughingToolpath, generateSpiralFlutes, generateWrappedPattern, generateHelicalPath, convertToInverseTime } from "./toolpath-engine";
+import { CATEK_TOOL_CYLINDER_CODES } from "@shared/schema";
 import type { MachineConfig, SpindleConfig, ToolpathPoint, Carving3DParams } from "@shared/schema";
 import * as fs from "fs";
 import * as path from "path";
@@ -89,22 +90,15 @@ export async function registerRoutes(
       machineConfig,
     });
 
-    // Parse G-code back to toolpath for visualization
+    // Parse G-code back to toolpath for visualization only. Do NOT save it
+    // over project.data.toolpath — that is the imported design profile, and
+    // overwriting it degrades every subsequent regeneration.
     const toolpath = parseGCode(gcode);
 
-    // Update project data with the new toolpath from G-code
-    const updatedData = {
-      ...(project.data as any),
-      toolpath: toolpath.length > 0 ? toolpath : (project.data as any).toolpath
-    };
+    // Save generated G-code to project
+    await storage.updateProject(project.id, { gcode });
 
-    // Save generated G-code and updated toolpath to project
-    await storage.updateProject(project.id, {
-      gcode,
-      data: updatedData
-    });
-
-    res.json({ gcode });
+    res.json({ gcode, toolpath });
   });
 
   // Parse G-code endpoint for simulation
@@ -559,6 +553,22 @@ async function seedDefaultTools() {
 
 async function seedDefaultMachineConfig() {
   const existing = await storage.getSetting('machine_config');
+
+  // Migrate configs saved before the cylinder codes were known: the old
+  // loaderCodes/auxCodes defaults (M68-M77) actually operate tool cylinders
+  // on the Catek control, so strip them and install the verified mapping.
+  if (existing) {
+    const value = existing.value as any;
+    if (!value.toolCylinderCodes || value.loaderCodes || value.auxCodes) {
+      const { loaderCodes, auxCodes, ...rest } = value;
+      await storage.upsertSetting('machine_config', {
+        ...rest,
+        toolCylinderCodes: value.toolCylinderCodes ?? CATEK_TOOL_CYLINDER_CODES,
+      });
+    }
+    return;
+  }
+
   if (!existing) {
     const defaultConfig: MachineConfig = {
       name: "Catek 7-in-1",
@@ -623,17 +633,7 @@ async function seedDefaultMachineConfig() {
       defaultRapidFeed: 5000,
       defaultWorkFeed: 200,
       defaultSpindleRPM: 2100,
-      loaderCodes: {
-        release: 'M69',
-        start: 'M70',
-        position: 'M71',
-        complete: 'M72',
-        clamp: 'M68',
-      },
-      auxCodes: {
-        dustOn: 'M76',
-        dustOff: 'M77',
-      },
+      toolCylinderCodes: CATEK_TOOL_CYLINDER_CODES,
       postProcessor: {
         programEnd: 'M30',
         toolFormat: 'Ttttt',

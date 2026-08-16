@@ -211,7 +211,13 @@ export function AxisConfirmDialog({
 
         <DialogFooter className="gap-2">
           <Button variant="outline" onClick={onCancel}>Cancel Import</Button>
-          <Button onClick={() => onConfirm(analysis)} className="gap-2">
+          <Button
+            onClick={() => onConfirm({
+              ...analysis,
+              axisMapping: { length: lengthAxis, radius: radiusAxis },
+            })}
+            className="gap-2"
+          >
             <CheckCircle2 className="w-4 h-4" />
             Confirm & Apply
           </Button>

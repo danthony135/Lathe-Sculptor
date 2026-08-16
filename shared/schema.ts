@@ -75,6 +75,39 @@ export interface SpindleConfig {
   };
 }
 
+// === TOOL CYLINDER M-CODES ===
+// Each turret tool ("cylinder") is engaged/disengaged pneumatically by an
+// M-code pair: the even code engages the cylinder, the next odd code
+// disengages it. Verified on the Catek control.
+
+export interface ToolCylinderCodes {
+  engage: string;     // even M-code, e.g. 'M70'
+  disengage: string;  // engage + 1 (odd), e.g. 'M71'
+}
+
+export const CATEK_TOOL_CYLINDER_CODES: Record<number, ToolCylinderCodes> = {
+  1:  { engage: 'M70', disengage: 'M71' },
+  2:  { engage: 'M72', disengage: 'M73' },
+  3:  { engage: 'M74', disengage: 'M75' },
+  4:  { engage: 'M76', disengage: 'M77' },
+  5:  { engage: 'M78', disengage: 'M79' },
+  6:  { engage: 'M86', disengage: 'M87' },
+  7:  { engage: 'M60', disengage: 'M61' },
+  8:  { engage: 'M62', disengage: 'M63' },
+  9:  { engage: 'M64', disengage: 'M65' },
+  10: { engage: 'M66', disengage: 'M67' },
+  11: { engage: 'M84', disengage: 'M85' },
+  12: { engage: 'M68', disengage: 'M69' },
+};
+
+/** Look up cylinder codes for a tool number, preferring machine-config overrides. */
+export function getToolCylinderCodes(
+  toolNumber: number,
+  config?: { toolCylinderCodes?: Record<number, ToolCylinderCodes> }
+): ToolCylinderCodes | undefined {
+  return config?.toolCylinderCodes?.[toolNumber] ?? CATEK_TOOL_CYLINDER_CODES[toolNumber];
+}
+
 // === MACHINE CONFIGURATION (stored in settings table) ===
 
 export interface MachineConfig {
@@ -97,20 +130,11 @@ export interface MachineConfig {
   defaultWorkFeed: number;
   defaultSpindleRPM: number;
 
-  // Loader M-codes
-  loaderCodes: {
-    release: string;    // M69
-    start: string;      // M70
-    position: string;   // M71
-    complete: string;   // M72
-    clamp: string;      // M68
-  };
-
-  // Auxiliary M-codes
-  auxCodes: {
-    dustOn: string;     // M76
-    dustOff: string;    // M77
-  };
+  // Tool cylinder engage/disengage M-codes (tool number → codes).
+  // Defaults to CATEK_TOOL_CYLINDER_CODES; editable in Settings.
+  // NOTE: M60-M87 are cylinder codes on this control — they are NOT
+  // loader or dust-collection codes as previously assumed.
+  toolCylinderCodes?: Record<number, ToolCylinderCodes>;
 
   // G-code post-processor settings
   postProcessor: {

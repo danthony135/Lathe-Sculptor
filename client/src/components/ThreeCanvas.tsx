@@ -678,6 +678,15 @@ export function ThreeCanvas({
   operations,
 }: ThreeCanvasProps) {
   const [internalProgress, setInternalProgress] = useState(simulationProgress);
+
+  // Re-sync from the parent whenever a simulation starts — otherwise
+  // internalProgress is stuck at 1 after a completed run and the `progress
+  // < 1` guard blocks every replay
+  useEffect(() => {
+    if (isSimulating) setInternalProgress(simulationProgress);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSimulating]);
+
   const progress = isSimulating ? internalProgress : simulationProgress;
 
   const currentPoint = useMemo(() => {

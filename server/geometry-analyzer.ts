@@ -132,9 +132,17 @@ export function analyzeGeometry(
     spans[Object.keys(spans).find(k => k !== axisMapping.length && k !== axisMapping.radius) as 'x' | 'y' | 'z']
   );
 
+  // Stock diameter must cover 2x the largest radial distance from the
+  // turning centerline. A 2D lathe profile spans 0..R on its radial axis,
+  // so using the raw span would under-size the stock by half.
+  const radialAxes = (['x', 'y', 'z'] as const).filter(a => a !== axisMapping.length);
+  const radialExtent = Math.max(
+    ...radialAxes.map(a => Math.max(Math.abs(bbox.min[a]), Math.abs(bbox.max[a])))
+  );
+
   const recommendedStock: MachineStock = {
     type: shapeResult.shape === 'axisymmetric' ? 'round' : 'square',
-    diameter: Math.ceil(radiusSpan + 10), // 5mm margin per side
+    diameter: Math.ceil(radialExtent * 2 + 10), // 5mm margin per side
     length: Math.ceil(lengthSpan + 20),   // 10mm margin per end
     zOffset: 0,
     material,

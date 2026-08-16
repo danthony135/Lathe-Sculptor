@@ -68,7 +68,8 @@ export const api = {
       method: 'POST' as const,
       path: '/api/projects/:id/gcode',
       responses: {
-        200: z.object({ gcode: z.string() }),
+        // toolpath: G-code parsed back into points, for visualization only
+        200: z.object({ gcode: z.string(), toolpath: z.array(z.any()).optional() }),
         404: errorSchemas.notFound,
       },
     }

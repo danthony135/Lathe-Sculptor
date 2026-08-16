@@ -598,12 +598,11 @@ export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
         case 'ARC': {
           const center = entity.center || { x: 0, y: 0, z: 0 };
           const arcRadius = entity.radius || 0;
-          let startAngleDeg = entity.startAngle || 0;
-          let endAngleDeg = entity.endAngle || 360;
-          
-          // Handle angle wrapping
-          let startAngle = (startAngleDeg * Math.PI) / 180;
-          let endAngle = (endAngleDeg * Math.PI) / 180;
+
+          // dxf-parser already converts group 50/51 angles to RADIANS —
+          // do not convert again or every arc collapses to ~1/57 of its sweep
+          let startAngle = entity.startAngle ?? 0;
+          let endAngle = entity.endAngle ?? Math.PI * 2;
           
           // Calculate arc span
           let arcSpan = endAngle - startAngle;
@@ -768,6 +767,19 @@ export async function parseDxfFile(file: File): Promise<ImportedGeometry> {
               z: last.z || 0,
             });
             updateBounds(last.x || 0, last.y || 0, (last as any).z || 0);
+          }
+          // Closed polylines (shape flag / closed flag) need the final
+          // segment from the last vertex back to the first
+          const isClosed = (entity as any).shape === true || (entity as any).closed === true;
+          if (isClosed && entityVertices.length > 2) {
+            const first = entityVertices[0] as any;
+            const last = entityVertices[entityVertices.length - 1] as any;
+            curves.push({
+              id: `seg-${segmentId++}`,
+              type: 'line',
+              start: { x: last.x || 0, y: last.y || 0, z: last.z || 0 },
+              end: { x: first.x || 0, y: first.y || 0, z: first.z || 0 },
+            });
           }
           break;
         }

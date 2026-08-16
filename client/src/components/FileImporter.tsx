@@ -63,7 +63,16 @@ async function detect3DSolid(file: File): Promise<{
 } | null> {
   try {
     const text = await file.text();
-    const has3DSolid = text.includes('3DSOLID') || text.includes('AcDbModelerGeometry');
+    // Only treat the file as a solid model if a 3DSOLID entity actually
+    // exists in the ENTITIES section. A whole-file substring search false
+    // positives on the CLASSES section, which lists "3DSOLID" as a class
+    // name in most AutoCAD R2000+ exports even for plain 2D drawings.
+    const entIdx = text.indexOf('ENTITIES');
+    const endIdx = entIdx === -1 ? -1 : text.indexOf('ENDSEC', entIdx);
+    const entitiesSection = entIdx === -1 ? '' : text.slice(entIdx, endIdx === -1 ? undefined : endIdx);
+    const has3DSolid =
+      /^\s*0\s*\r?\n\s*3DSOLID\s*$/m.test(entitiesSection) ||
+      entitiesSection.includes('AcDbModelerGeometry');
 
     if (!has3DSolid) {
       return { has3DSolid: false };

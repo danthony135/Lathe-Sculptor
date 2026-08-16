@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, Wrench, Settings, Box, LogOut } from "lucide-react";
+import { LayoutDashboard, Wrench, Settings, Box, LogOut, GraduationCap } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function Navigation() {
@@ -8,6 +8,7 @@ export function Navigation() {
   const links = [
     { href: "/", label: "Projects", icon: Box },
     { href: "/tools", label: "Tool Library", icon: Wrench },
+    { href: "/training", label: "Training", icon: GraduationCap },
     { href: "/settings", label: "Settings", icon: Settings },
   ];
 

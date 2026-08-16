@@ -11,6 +11,7 @@ import Dashboard from "@/pages/Dashboard";
 import ProjectEditor from "@/pages/ProjectEditor";
 import ToolLibrary from "@/pages/ToolLibrary";
 import Settings from "@/pages/Settings";
+import Training from "@/pages/Training";
 
 function Router() {
   return (
@@ -42,6 +43,15 @@ function Router() {
           <Navigation />
           <main className="flex-1 ml-16 md:ml-64 transition-all duration-300">
             <Settings />
+          </main>
+        </div>
+      </Route>
+
+      <Route path="/training">
+        <div className="flex min-h-screen bg-background text-foreground font-sans">
+          <Navigation />
+          <main className="flex-1 ml-16 md:ml-64 transition-all duration-300">
+            <Training />
           </main>
         </div>
       </Route>

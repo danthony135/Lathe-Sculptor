@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 import { useMachineConfig, useUpdateSetting } from "@/hooks/use-settings";
+import { CATEK_TOOL_CYLINDER_CODES } from "@shared/schema";
 import type { MachineConfig, SpindleConfig } from "@shared/schema";
 import { Settings as SettingsIcon, Cpu, Wrench, Zap, Save } from "lucide-react";
 
@@ -19,7 +20,12 @@ export default function Settings() {
 
   useEffect(() => {
     if (machineConfig) {
-      setConfig(structuredClone(machineConfig));
+      const cloned = structuredClone(machineConfig);
+      // Configs saved before the cylinder codes were known lack this field
+      if (!cloned.toolCylinderCodes) {
+        cloned.toolCylinderCodes = structuredClone(CATEK_TOOL_CYLINDER_CODES);
+      }
+      setConfig(cloned);
     }
   }, [machineConfig]);
 
@@ -30,8 +36,7 @@ export default function Settings() {
 
     // Validate M-codes
     const allMCodes = [
-      ...Object.values(config.loaderCodes),
-      ...Object.values(config.auxCodes),
+      ...Object.values(config.toolCylinderCodes ?? {}).flatMap(c => [c.engage, c.disengage]),
       config.postProcessor.programEnd,
       ...config.spindles.flatMap(s => [s.mCodes.start, s.mCodes.stop, s.mCodes.reverse].filter(Boolean) as string[]),
     ];
@@ -225,31 +230,49 @@ export default function Settings() {
         {/* M-Codes Tab */}
         <TabsContent value="mcodes">
           <Card>
-            <CardHeader><CardTitle>Loader & Auxiliary M-Codes</CardTitle></CardHeader>
-            <CardContent className="space-y-6">
-              <div>
-                <h3 className="text-sm font-semibold mb-3">Auto-Loader Sequence</h3>
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                  {(Object.keys(config.loaderCodes) as (keyof typeof config.loaderCodes)[]).map(key => (
-                    <div key={key} className="space-y-1">
-                      <Label className="text-xs capitalize">{key}</Label>
-                      <Input value={config.loaderCodes[key]} onChange={e => setConfig(prev => prev ? { ...prev, loaderCodes: { ...prev.loaderCodes, [key]: e.target.value } } : prev)} className="font-mono text-sm" />
+            <CardHeader><CardTitle>Tool Cylinder M-Codes</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Each turret tool ("cylinder") is engaged and disengaged pneumatically by an
+                M-code pair. The even code engages the tool; the next odd number disengages it.
+                These are emitted automatically around every operation in generated G-code.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {Object.entries(config.toolCylinderCodes ?? CATEK_TOOL_CYLINDER_CODES)
+                  .sort(([a], [b]) => Number(a) - Number(b))
+                  .map(([toolNum, codes]) => (
+                    <div key={toolNum} className="flex items-center gap-3 border rounded-lg p-3">
+                      <span className="font-mono font-semibold w-24 shrink-0">Tool {toolNum}</span>
+                      <div className="space-y-1 flex-1">
+                        <Label className="text-xs">Engage</Label>
+                        <Input
+                          value={codes.engage}
+                          onChange={e => setConfig(prev => prev ? {
+                            ...prev,
+                            toolCylinderCodes: {
+                              ...(prev.toolCylinderCodes ?? CATEK_TOOL_CYLINDER_CODES),
+                              [Number(toolNum)]: { ...codes, engage: e.target.value },
+                            },
+                          } : prev)}
+                          className="font-mono text-sm"
+                        />
+                      </div>
+                      <div className="space-y-1 flex-1">
+                        <Label className="text-xs">Disengage</Label>
+                        <Input
+                          value={codes.disengage}
+                          onChange={e => setConfig(prev => prev ? {
+                            ...prev,
+                            toolCylinderCodes: {
+                              ...(prev.toolCylinderCodes ?? CATEK_TOOL_CYLINDER_CODES),
+                              [Number(toolNum)]: { ...codes, disengage: e.target.value },
+                            },
+                          } : prev)}
+                          className="font-mono text-sm"
+                        />
+                      </div>
                     </div>
                   ))}
-                </div>
-              </div>
-              <div className="border-t pt-4">
-                <h3 className="text-sm font-semibold mb-3">Auxiliary Controls</h3>
-                <div className="grid grid-cols-2 gap-3 max-w-xs">
-                  <div className="space-y-1">
-                    <Label className="text-xs">Dust Collection ON</Label>
-                    <Input value={config.auxCodes.dustOn} onChange={e => setConfig(prev => prev ? { ...prev, auxCodes: { ...prev.auxCodes, dustOn: e.target.value } } : prev)} className="font-mono text-sm" />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">Dust Collection OFF</Label>
-                    <Input value={config.auxCodes.dustOff} onChange={e => setConfig(prev => prev ? { ...prev, auxCodes: { ...prev.auxCodes, dustOff: e.target.value } } : prev)} className="font-mono text-sm" />
-                  </div>
-                </div>
               </div>
             </CardContent>
           </Card>
