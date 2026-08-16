@@ -1,6 +1,6 @@
 import {
   ProjectData, ToolpathPoint, Operation, MachineConfig, SpindleConfig,
-  ProfileSegment3D, Point3D,
+  ProfileSegment3D, Point3D, Tool,
   DrillingParams, GroovingParams, ThreadingParams, PlaningParams,
   EngravingParams, Carving3DParams, Contouring4AxisParams,
   getToolCylinderCodes
@@ -34,6 +34,8 @@ import {
 export interface GCodeGeneratorOptions {
   projectName?: string;
   machineConfig?: MachineConfig;
+  /** Tool library rows — geometry + wear offsets are applied to emitted coordinates */
+  tools?: Tool[];
   includeComments?: boolean;
   stockLength?: number;
   cuttingFeed?: number;
@@ -95,6 +97,30 @@ function fmt(n: number, decimals: number = 3): string {
   return n.toFixed(decimals);
 }
 
+/** Combined geometry + wear offset for one tool. x is on the DIAMETER (same
+ * axis convention as programmed X words); z shifts along the bed. */
+export interface ToolOffset { x: number; z: number; }
+
+/** Build toolNumber → combined offset map from tool library rows */
+function buildToolOffsets(tools?: Tool[]): Map<number, ToolOffset> {
+  const map = new Map<number, ToolOffset>();
+  for (const tool of tools ?? []) {
+    const o = (tool.params as any)?.offsets;
+    if (!o) continue;
+    const x = (Number(o.offsetX) || 0) + (Number(o.wearOffsetX) || 0);
+    const z = (Number(o.offsetZ) || 0) + (Number(o.wearOffsetZ) || 0);
+    if (x !== 0 || z !== 0) map.set(tool.toolNumber, { x, z });
+  }
+  return map;
+}
+
+const ZERO_OFFSET: ToolOffset = { x: 0, z: 0 };
+
+/** Offset for an operation's tool (zero if none configured) */
+function opOffset(op: Operation, ctx: OpContext): ToolOffset {
+  return ctx.toolOffsets?.get(op.toolNumber) ?? ZERO_OFFSET;
+}
+
 /**
  * Wrap an operation's G-code with tool cylinder pneumatics: the engage
  * M-code goes right after the Ttttt select, the disengage M-code after the
@@ -122,6 +148,7 @@ export function generateGCode(
   const {
     projectName = "Untitled",
     machineConfig,
+    tools,
     stockLength = data.stock?.length || 910,
     cuttingFeed = 200,
     spindleRPM = 2100,
@@ -143,6 +170,7 @@ export function generateGCode(
   const gcode: string[] = [];
   const stockDiameter = data.stock?.diameter || 100;
   const quantity = data.quantity || 1;
+  const toolOffsets = buildToolOffsets(tools);
 
   // Classify operations
   const hasContinuousOps = data.operations?.some(op =>
@@ -162,6 +190,12 @@ export function generateGCode(
 
   // Project name header
   gcode.push(projectName);
+  gcode.push('');
+
+  // === POST-PROCESSOR PREAMBLE ===
+  const post = machineConfig?.postProcessor;
+  gcode.push(post?.units === 'imperial' ? 'G20' : 'G21');
+  if (post?.coordinateSystem) gcode.push(post.coordinateSystem);
   gcode.push('');
 
   // === INITIALIZATION ===
@@ -191,7 +225,7 @@ export function generateGCode(
       for (const op of data.operations) {
         const opGcode = generateOperationGCode(data, op, {
           safeX, safeY, safeZ: machineConfig?.safeZ ?? 50,
-          stockLength, stockDiameter, machineConfig,
+          stockLength, stockDiameter, machineConfig, toolOffsets,
           cuttingFeed, spindleRPM, singleRoughingPass,
           knifeToolNumber, sandingToolNumber,
           paddleOffset, sandingRPM, sandingFeed,
@@ -203,7 +237,7 @@ export function generateGCode(
       const legacyGcode = generateLegacyTurningWorkflow(data, {
         safeX, safeY, stockLength, stockDiameter, cuttingFeed, spindleRPM,
         singleRoughingPass, knifeToolNumber, sandingToolNumber,
-        paddleOffset, sandingRPM, sandingFeed, machineConfig,
+        paddleOffset, sandingRPM, sandingFeed, machineConfig, toolOffsets,
       });
       gcode.push(...legacyGcode);
     }
@@ -233,6 +267,7 @@ interface OpContext {
   stockLength: number;
   stockDiameter: number;
   machineConfig?: MachineConfig;
+  toolOffsets?: Map<number, ToolOffset>;
   cuttingFeed: number;
   spindleRPM: number;
   singleRoughingPass: boolean;
@@ -299,7 +334,8 @@ function generateRoughingGCode(data: ProjectData, op: Operation, ctx: OpContext)
   // Rough down to just above the LARGEST profile diameter: a straight
   // full-length pass any deeper would gouge sections of the part that stay
   // fat. The finishing pass then follows the actual profile.
-  const roughTargetDiameter = maxProfileRadius(data.toolpath) * 2 + (op.params.allowance ?? 2);
+  const off = opOffset(op, ctx);
+  const roughTargetDiameter = maxProfileRadius(data.toolpath) * 2 + (op.params.allowance ?? 2) + off.x;
 
   gcode.push(formatTool(op.toolNumber));
   gcode.push('');
@@ -312,9 +348,10 @@ function generateRoughingGCode(data: ProjectData, op: Operation, ctx: OpContext)
   if (op.compensationMode === 'left') gcode.push(`G41 D${op.toolNumber.toString().padStart(2,'0')}`);
   else if (op.compensationMode === 'right') gcode.push(`G42 D${op.toolNumber.toString().padStart(2,'0')}`);
 
+  const roughEndZ = -ctx.stockLength + off.z;
   if (ctx.singleRoughingPass || depthPerPass * 2 >= (ctx.stockDiameter - roughTargetDiameter)) {
     gcode.push(`G0X${fmt(roughTargetDiameter)} Z0`);
-    gcode.push(`G1Z-${fmt(ctx.stockLength, 1)} F${fmt(feed, 0)}`);
+    gcode.push(`G1Z${fmt(roughEndZ, 1)} F${fmt(feed, 0)}`);
     gcode.push(`G0X${ctx.safeX}`);
   } else {
     let currentDiameter = ctx.stockDiameter;
@@ -322,7 +359,7 @@ function generateRoughingGCode(data: ProjectData, op: Operation, ctx: OpContext)
       currentDiameter = Math.max(currentDiameter - depthPerPass * 2, roughTargetDiameter);
       gcode.push(`G0X${ctx.safeX} Z0`);
       gcode.push(`G0X${fmt(currentDiameter)} Z0`);
-      gcode.push(`G1Z-${fmt(ctx.stockLength, 1)} F${fmt(feed, 0)}`);
+      gcode.push(`G1Z${fmt(roughEndZ, 1)} F${fmt(feed, 0)}`);
       gcode.push(`G0X${ctx.safeX}`);
     }
   }
@@ -350,7 +387,9 @@ function generateTurningGCode(data: ProjectData, op: Operation, ctx: OpContext):
   if (op.compensationMode === 'left') gcode.push(`G41 D${op.toolNumber.toString().padStart(2,'0')}`);
   else if (op.compensationMode === 'right') gcode.push(`G42 D${op.toolNumber.toString().padStart(2,'0')}`);
 
-  const profileGcode = generateProfileFromToolpath(data.toolpath, feed, ctx.stockLength, ctx.stockDiameter, 0);
+  const profileGcode = generateProfileFromToolpath(
+    data.toolpath, feed, ctx.stockLength, ctx.stockDiameter, 0, false, opOffset(op, ctx)
+  );
   gcode.push(...profileGcode);
 
   if (op.compensationMode && op.compensationMode !== 'none') gcode.push('G40');
@@ -378,7 +417,8 @@ function generateSandingOpGCode(data: ProjectData, op: Operation, ctx: OpContext
     ctx.stockLength,
     ctx.stockDiameter,
     actualPaddleOffset * 2,
-    true
+    true,
+    opOffset(op, ctx)
   );
   gcode.push(...sandingGcode);
   gcode.push(`G0X${ctx.safeX} Z0`);
@@ -412,7 +452,8 @@ function generateDrillingGCode(data: ProjectData, op: Operation, ctx: OpContext)
 
   // X is diameter mode: a radial depth of holeDepth needs 2x on the X word,
   // and the retract plane sits 2x the radial clearance above the surface.
-  const xBottom = ctx.stockDiameter - holeDepth * 2;
+  const drillOff = opOffset(op, ctx);
+  const xBottom = ctx.stockDiameter - holeDepth * 2 + drillOff.x;
   const rPlane = ctx.stockDiameter + retract * 2;
 
   // Get hole positions
@@ -424,10 +465,10 @@ function generateDrillingGCode(data: ProjectData, op: Operation, ctx: OpContext)
   // every position at every angle.
   const holes: { angle: number; z: number }[] = [];
   if (indexAngles && indexAngles.length === positions.length) {
-    positions.forEach((pos, i) => holes.push({ angle: indexAngles[i], z: pos.z }));
+    positions.forEach((pos, i) => holes.push({ angle: indexAngles[i], z: pos.z + drillOff.z }));
   } else {
     for (const angle of indexAngles || [0]) {
-      for (const pos of positions) holes.push({ angle, z: pos.z });
+      for (const pos of positions) holes.push({ angle, z: pos.z + drillOff.z });
     }
   }
 
@@ -481,10 +522,11 @@ function generateGroovingGCode(data: ProjectData, op: Operation, ctx: OpContext)
   gcode.push('');
 
   const stockRadius = ctx.stockDiameter / 2;
-  const targetDiameter = ctx.stockDiameter - params.grooveDepth * 2;
+  const grooveOff = opOffset(op, ctx);
+  const targetDiameter = ctx.stockDiameter - params.grooveDepth * 2 + grooveOff.x;
 
   for (let i = 0; i < params.zPositions.length; i++) {
-    const z = params.zPositions[i];
+    const z = params.zPositions[i] + grooveOff.z;
     gcode.push(`(GROOVE ${i + 1} AT Z${fmt(z)})`);
 
     // Position above groove
@@ -577,11 +619,24 @@ function generateThreadingGCode(data: ProjectData, op: Operation, ctx: OpContext
   // First cut depth in microns for Q word
   const firstCutMicrons = Math.round(params.firstCutDepth * 1000);
 
+  const threadOff = opOffset(op, ctx);
   let finalDiameter: number;
+  let approachX: number;
   if (isExternal) {
-    finalDiameter = stockDia - params.threadDepth * 2;
+    // External: thread minor diameter = OD minus twice the depth
+    finalDiameter = stockDia - params.threadDepth * 2 + threadOff.x;
+    approachX = stockDia + 5;
   } else {
-    finalDiameter = stockDia + params.threadDepth * 2;
+    // Internal: threads cut OUTWARD from a pre-drilled bore. Without the
+    // bore diameter there is no valid geometry — refuse to guess.
+    if (!params.boreDiameter || params.boreDiameter <= 0) {
+      gcode.push('(INTERNAL THREAD SKIPPED: boreDiameter not set)');
+      gcode.push('(Set the pre-drilled bore diameter in the threading parameters)');
+      return gcode;
+    }
+    finalDiameter = params.boreDiameter + params.threadDepth * 2 + threadOff.x;
+    // Approach inside the bore, clear of the wall
+    approachX = Math.max(params.boreDiameter - 2, 1);
   }
 
   gcode.push(`(${params.threadForm.toUpperCase()} THREAD - ${params.pitch}mm PITCH)`);
@@ -589,12 +644,12 @@ function generateThreadingGCode(data: ProjectData, op: Operation, ctx: OpContext
   gcode.push('');
 
   // Position at start
-  gcode.push(`G0 X${fmt(stockDia + 5)} Z${fmt(params.startZ + 5)}`);
+  gcode.push(`G0 X${fmt(approachX)} Z${fmt(params.startZ + 5 + threadOff.z)}`);
 
   // First G76 line: spring passes, chamfer, angle, min depth, finish allowance
   gcode.push(`G76 P${springStr}${chamferStr}${angleStr} Q${minCutMicrons} R${finishAllowance}`);
   // Second G76 line: final diameter, end Z, depth, first cut depth, pitch
-  gcode.push(`G76 X${fmt(finalDiameter)} Z${fmt(params.endZ)} P${depthMicrons} Q${firstCutMicrons} F${fmt(params.pitch)}`);
+  gcode.push(`G76 X${fmt(finalDiameter)} Z${fmt(params.endZ + threadOff.z)} P${depthMicrons} Q${firstCutMicrons} F${fmt(params.pitch)}`);
   gcode.push('');
 
   gcode.push(`G0 X${ctx.safeX} Z${ctx.safeZ}`);
@@ -696,26 +751,27 @@ function generateEngravingGCode(data: ProjectData, op: Operation, ctx: OpContext
     gcode.push(`(ENGRAVING TEXT: "${params.text}")`);
   }
 
-  // Use toolpath data for engraving path if available
-  // The engraving engine (server-side) converts text/SVG to toolpath points
+  // Use toolpath data for engraving path if available.
+  // The engraving engine maps text along Z with glyph height as A-axis
+  // rotation; the tool plunges in Y. surfaceAngle orients the whole text.
   if (data.toolpath && data.toolpath.length > 0) {
     let penDown = false;
 
     for (const point of data.toolpath) {
-      const z = point.z;
-      const y = -(stockRadius - stockRadius + engravingDepth); // Surface depth
+      const a = params.surfaceAngle + (point.a || 0);
 
-      if (point.moveType === 'rapid' || !penDown) {
-        // Lift, move, plunge
+      if (point.moveType === 'rapid') {
+        // Lift and reposition
         gcode.push(`G0 Y${ctx.safeY}`);
-        gcode.push(`G0 Z${fmt(z)}`);
-        gcode.push(`G1 Y${fmt(y)} F${fmt(feed * 0.5, 0)}`); // Slow plunge
-        penDown = true;
+        gcode.push(`G0 Z${fmt(point.z)} A${fmt(a, 2)}`);
+        penDown = false;
       } else {
-        // Linear engraving move. Arc points from the interpolator are
-        // emitted as G1 too: they carry no I/K center data, and a G02/G03
-        // without a center or radius word alarms the control.
-        gcode.push(`G1 Z${fmt(z)} Y${fmt(y)} F${fmt(feed, 0)}`);
+        if (!penDown) {
+          gcode.push(`G1 Y${fmt(-engravingDepth)} F${fmt(feed * 0.5, 0)}`); // Slow plunge
+          penDown = true;
+        }
+        // Linear engraving stroke (arcs are pre-tessellated by the engine)
+        gcode.push(`G1 Z${fmt(point.z)} A${fmt(a, 2)} F${fmt(feed, 0)}`);
       }
     }
     gcode.push(`G0 Y${ctx.safeY}`);
@@ -899,7 +955,8 @@ function generateProfileFromToolpath(
   stockLength: number,
   stockDiameter: number,
   diameterOffset: number = 0,
-  reverse: boolean = false
+  reverse: boolean = false,
+  toolOffset: ToolOffset = ZERO_OFFSET
 ): string[] {
   const gcode: string[] = [];
   if (toolpath.length === 0) return gcode;
@@ -925,9 +982,9 @@ function generateProfileFromToolpath(
     .sort((a, b) => reverse ? a[0] - b[0] : b[0] - a[0]);
 
   if (!reverse) {
-    const startDiameter = maxDiameter - 0.036 - diameterOffset;
-    gcode.push(`G0X${fmt(startDiameter)}Z0.000`);
-    gcode.push(`G1Z0 F${fmt(feedRate, 1)}`);
+    const startDiameter = maxDiameter - 0.036 - diameterOffset + toolOffset.x;
+    gcode.push(`G0X${fmt(startDiameter)}Z${fmt(toolOffset.z)}`);
+    gcode.push(`G1Z${fmt(toolOffset.z)} F${fmt(feedRate, 1)}`);
   }
 
   let lastRadius = reverse ? 0 : maxDiameter / 2;
@@ -935,14 +992,14 @@ function generateProfileFromToolpath(
   let isFirst = true;
 
   for (const [z, radius] of sortedZLevels) {
-    const xDiameter = radius * 2 - diameterOffset;
-    const zNeg = z <= 0 ? z : -z;
-    if (Math.abs(zNeg) > stockLength) continue;
+    const xDiameter = radius * 2 - diameterOffset + toolOffset.x;
+    const zNeg = (z <= 0 ? z : -z) + toolOffset.z;
+    if (Math.abs(zNeg) > stockLength + Math.abs(toolOffset.z)) continue;
 
     if (reverse && isFirst) {
       gcode.push(`G1X${fmt(xDiameter)}Z${fmt(zNeg)} F${fmt(feedRate, 1)}`);
       isFirst = false;
-    } else if (Math.abs(xDiameter - (lastRadius * 2 - diameterOffset)) > 0.001 || Math.abs(zNeg - lastZ) > 0.001) {
+    } else if (Math.abs(xDiameter - (lastRadius * 2 - diameterOffset + toolOffset.x)) > 0.001 || Math.abs(zNeg - lastZ) > 0.001) {
       gcode.push(`X${fmt(xDiameter)}Z${fmt(zNeg)}`);
     }
 
@@ -963,9 +1020,11 @@ function generateLegacyTurningWorkflow(data: ProjectData, ctx: {
   knifeToolNumber: number; sandingToolNumber: number;
   paddleOffset: number; sandingRPM: number; sandingFeed: number;
   machineConfig?: MachineConfig;
+  toolOffsets?: Map<number, ToolOffset>;
 }): string[] {
   const gcode: string[] = [];
   const knifeCyl = getToolCylinderCodes(ctx.knifeToolNumber, ctx.machineConfig);
+  const knifeOff = ctx.toolOffsets?.get(ctx.knifeToolNumber) ?? ZERO_OFFSET;
 
   // Rough to just above the LARGEST profile diameter (see generateRoughingGCode)
   const roughTargetDiameter = maxProfileRadius(data.toolpath) * 2 + 2;
@@ -1004,7 +1063,9 @@ function generateLegacyTurningWorkflow(data: ProjectData, ctx: {
   gcode.push('G0Z0');
   gcode.push(`G0X${ctx.safeX} Z0`);
 
-  const profileGcode = generateProfileFromToolpath(data.toolpath, ctx.cuttingFeed, ctx.stockLength, ctx.stockDiameter, 0);
+  const profileGcode = generateProfileFromToolpath(
+    data.toolpath, ctx.cuttingFeed, ctx.stockLength, ctx.stockDiameter, 0, false, knifeOff
+  );
   gcode.push(...profileGcode);
   if (knifeCyl) gcode.push(knifeCyl.disengage);
 
@@ -1016,6 +1077,7 @@ function generateLegacyTurningWorkflow(data: ProjectData, ctx: {
     const actualSandingFeed = sandingOp?.params?.feedRate ?? ctx.sandingFeed;
     const actualSandingTool = sandingOp?.toolNumber ?? ctx.sandingToolNumber;
     const sandCyl = getToolCylinderCodes(actualSandingTool, ctx.machineConfig);
+    const sandOff = ctx.toolOffsets?.get(actualSandingTool) ?? ZERO_OFFSET;
 
     gcode.push('');
     gcode.push(formatTool(actualSandingTool));
@@ -1024,7 +1086,7 @@ function generateLegacyTurningWorkflow(data: ProjectData, ctx: {
 
     const sandingGcode = generateProfileFromToolpath(
       data.toolpath, actualSandingFeed, ctx.stockLength, ctx.stockDiameter,
-      actualPaddleOffset * 2, true
+      actualPaddleOffset * 2, true, sandOff
     );
     gcode.push(...sandingGcode);
     if (sandCyl) gcode.push(sandCyl.disengage);

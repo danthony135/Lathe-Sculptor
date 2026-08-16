@@ -113,22 +113,19 @@ export function generateSpiralFlutes(options: SpiralFluteOptions): ToolpathPoint
         moveType: 'linear',
       });
 
-      // Helical cut: Z and A move simultaneously
+      // Helical cut: Z and A move simultaneously. Feed rates here are
+      // plain mm/min — G93 inverse-time conversion is applied afterwards
+      // by convertToInverseTime() when the caller requests it, per segment.
       const steps = Math.ceil(cutLength / 0.5); // 0.5mm resolution along Z
       for (let i = 0; i <= steps; i++) {
         const t = i / steps;
         const z = startZ + (endZ - startZ) * t;
         const a = fluteStartAngle + totalAngle * t;
 
-        // Calculate inverse time feed for this segment
-        const inverseFeed = calculateInverseTimeFeed(
-          feedRate, stockRadius, degreesPerMm, 1
-        );
-
         toolpath.push({
           x: cutRadius, y: 0,
           z, a,
-          feedRate: inverseFeed,
+          feedRate,
           moveType: 'linear',
         });
       }
@@ -315,8 +312,13 @@ export function convertToInverseTime(
     const da = (point.a || 0) - (prev.a || 0);
     const linearDist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
+    // Arc distance depends on the radius the tool is actually cutting at,
+    // not the stock surface — use the segment's mean radial position,
+    // falling back to stock radius for degenerate values.
+    const segmentRadius = (Math.abs(point.x) + Math.abs(prev.x)) / 2 || stockRadius;
+
     point.feedRate = calculateInverseTimeFeed(
-      desiredFeedRate, stockRadius, da, linearDist
+      desiredFeedRate, segmentRadius, da, linearDist
     );
     result.push(point);
   }

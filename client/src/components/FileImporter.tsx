@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Upload, FileType2, CheckCircle, AlertCircle, AlertTriangle, X, Package, ExternalLink, RefreshCw, FileDown } from 'lucide-react';
-import { parseDxfFile, parseDwgFile, parseStlFile, parseObjFile, adjustGeometryToMachine, type GeometryAdjustment } from '@/lib/dxf-parser';
+import { parseDxfFile, parseStlFile, parseObjFile, adjustGeometryToMachine, type GeometryAdjustment } from '@/lib/dxf-parser';
 import type { ImportedGeometry, Point3D, ProfileSegment3D } from '@shared/schema';
 import { useToast } from '@/hooks/use-toast';
 
@@ -362,28 +362,30 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
     const extension = file.name.split('.').pop()?.toLowerCase();
 
     try {
-      if (extension === 'dxf' || extension === 'dwg') {
+      if (extension === 'dwg') {
+        // Native DWG parsing is not supported (no DWG library is bundled).
+        // Fail honestly instead of pretending — DXF exports work fine.
+        throw new Error(
+          'DWG files are not supported. In AutoCAD (or your CAD software) use "Save As" → DXF and import that instead.'
+        );
+      } else if (extension === 'dxf') {
         setProgress(10);
-        
-        // Check for 3DSOLID entities first (for DXF files)
-        if (extension === 'dxf') {
-          const solidCheck = await detect3DSolid(file);
-          if (solidCheck?.has3DSolid) {
-            setIsProcessing(false);
-            setSolidInfo({ 
-              fileName: file.name, 
-              dimensions: solidCheck.estimatedDimensions 
-            });
-            setPendingFile(file);
-            setShow3DSolidDialog(true);
-            return;
-          }
+
+        // Check for 3DSOLID entities first
+        const solidCheck = await detect3DSolid(file);
+        if (solidCheck?.has3DSolid) {
+          setIsProcessing(false);
+          setSolidInfo({
+            fileName: file.name,
+            dimensions: solidCheck.estimatedDimensions
+          });
+          setPendingFile(file);
+          setShow3DSolidDialog(true);
+          return;
         }
-        
+
         setProgress(20);
-        const rawGeometry = extension === 'dwg'
-          ? await parseDwgFile(file)
-          : await parseDxfFile(file);
+        const rawGeometry = await parseDxfFile(file);
         setProgress(60);
 
         // Auto-detect units from DXF header ($INSUNITS) or dimension heuristic
@@ -477,43 +479,13 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
           });
         }
       } else if (extension === 'step' || extension === 'stp') {
-        setProgress(20);
-        toast({
-          title: 'STEP file detected',
-          description: 'STEP file support requires additional processing. Converting to simplified geometry...',
-        });
-        
-        const rawGeometry: ImportedGeometry = {
-          sourceFile: file.name,
-          fileType: 'step',
-          vertices: [
-            { x: 0, y: 0, z: 0 },
-            { x: 0, y: 25, z: 0 },
-            { x: 0, y: 25, z: 50 },
-            { x: 0, y: 20, z: 60 },
-            { x: 0, y: 15, z: 80 },
-            { x: 0, y: 20, z: 100 },
-            { x: 0, y: 25, z: 120 },
-            { x: 0, y: 25, z: 150 },
-            { x: 0, y: 0, z: 150 },
-          ],
-          curves: [],
-          boundingBox: {
-            min: { x: 0, y: 0, z: 0 },
-            max: { x: 0, y: 25, z: 150 },
-          },
-        };
-        
-        setProgress(60);
-        
-        // Store raw geometry
-        const { geometry, adjustment } = adjustGeometryToMachine(rawGeometry);
-        
-        setProgress(80);
-        setImportedFile({ name: file.name, geometry, rawGeometry, adjustment });
-        setProgress(100);
+        // STEP parsing is not implemented. The old code silently substituted
+        // a hardcoded placeholder part here — never do that with real jobs.
+        throw new Error(
+          'STEP files are not supported yet. Export your model as STL (for 3D parts) or DXF (for 2D profiles) and import that instead.'
+        );
       } else {
-        throw new Error(`Unsupported file format: .${extension}. Please use .dxf/.dwg (AutoCAD), .stl/.obj (3D mesh), or .step/.stp (SolidWorks)`);
+        throw new Error(`Unsupported file format: .${extension}. Please use .dxf (AutoCAD) or .stl/.obj (3D mesh)`);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to parse file';
@@ -559,10 +531,8 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
 
       <div className="flex gap-2 flex-wrap">
         <Badge variant="outline">DXF (AutoCAD)</Badge>
-        <Badge variant="outline">DWG (AutoCAD)</Badge>
         <Badge variant="outline">STL (3D Mesh)</Badge>
         <Badge variant="outline">OBJ (3D Model)</Badge>
-        <Badge variant="outline">STEP (SolidWorks)</Badge>
       </div>
 
       <div className="flex items-center gap-4 flex-wrap">
@@ -615,7 +585,7 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
           <input
             ref={inputRef}
             type="file"
-            accept=".dxf,.dwg,.stl,.obj,.step,.stp"
+            accept=".dxf,.stl,.obj"
             onChange={handleFileSelect}
             className="hidden"
             data-testid="input-file-import"
@@ -625,7 +595,7 @@ export function FileImporter({ onImport, onCancel }: FileImporterProps) {
             Drag and drop your CAD file here, or click to browse
           </p>
           <p className="text-xs text-muted-foreground mt-2">
-            Supports: .dxf/.dwg (AutoCAD), .stl/.obj (3D mesh), .step/.stp (SolidWorks)
+            Supports: .dxf (AutoCAD), .stl/.obj (3D mesh). For DWG or STEP files, export as DXF/STL first.
           </p>
         </div>
       )}

@@ -4,6 +4,15 @@
  * Converts text strings (via opentype.js font parsing) and SVG path data
  * into ToolpathPoint[] arrays for the G-code generator.
  *
+ * Coordinate mapping (engraving on the cylindrical surface):
+ * - Glyph X (along the text baseline) → machine Z, starting at startZ and
+ *   running toward the tailstock (negative Z direction)
+ * - Glyph Y (glyph height) → A-axis rotation, as arc length on the surface
+ *   at radius xOffset (opentype uses y-down coordinates, so +glyph-y maps
+ *   to negative rotation)
+ * - Toolpath x is the radial contact position: xOffset - engravingDepth
+ *   while cutting, xOffset + 2 retracted
+ *
  * V-bit depth calculation: depth = (lineWidth / 2) / tan(bitAngle / 2)
  */
 
@@ -23,7 +32,7 @@ export interface EngravingOptions {
   engravingDepth: number;    // mm (constant depth for single-line engraving)
   vBitAngle?: number;        // degrees — if set, depth varies with stroke width
   startZ: number;            // mm — Z position where text starts
-  xOffset: number;           // mm — radial offset from center (for surface positioning)
+  xOffset: number;           // mm — radial offset from center (surface radius)
   letterSpacing?: number;    // mm extra spacing between characters
   lineHeight?: number;       // mm for multi-line text
   tolerance?: number;        // mm — curve approximation tolerance (smaller = more points)
@@ -36,6 +45,103 @@ export interface SvgEngravingOptions {
   startZ: number;
   xOffset: number;
   tolerance?: number;
+}
+
+// ============================================================
+// SHARED EMITTER
+// ============================================================
+
+/**
+ * Accumulates toolpath points for engraving strokes in a 2D plane
+ * (u = mm along the baseline, v = mm perpendicular / glyph height, y-down)
+ * and maps them onto the machine axes.
+ */
+class StrokeEmitter {
+  readonly toolpath: ToolpathPoint[] = [];
+  private penDown = false;
+  private lastU = 0;
+  private lastV = 0;
+
+  constructor(
+    private startZ: number,
+    private surfaceRadius: number,
+    private engravingDepth: number,
+  ) {}
+
+  /** Convert planar (u, v) to machine coordinates */
+  private map(u: number, v: number): { z: number; a: number } {
+    const z = this.startZ - u;
+    // Arc length v on the surface → rotation angle; y-down means positive v
+    // rotates negative. Guard against a zero radius.
+    const r = Math.max(this.surfaceRadius, 0.001);
+    const a = -(v / r) * (180 / Math.PI);
+    return { z, a };
+  }
+
+  get position(): { u: number; v: number } {
+    return { u: this.lastU, v: this.lastV };
+  }
+
+  /** Lift the tool and rapid to a new planar position */
+  moveTo(u: number, v: number) {
+    const { z, a } = this.map(u, v);
+    this.toolpath.push({
+      x: this.surfaceRadius + 2, y: 0, z, a, moveType: 'rapid',
+    });
+    // Plunge to depth at the new position
+    this.toolpath.push({
+      x: this.surfaceRadius - this.engravingDepth, y: 0, z, a, moveType: 'linear',
+    });
+    this.lastU = u;
+    this.lastV = v;
+    this.penDown = true;
+  }
+
+  /** Cut a straight stroke to a planar position */
+  lineTo(u: number, v: number) {
+    if (!this.penDown) {
+      this.moveTo(u, v);
+      return;
+    }
+    const { z, a } = this.map(u, v);
+    this.toolpath.push({
+      x: this.surfaceRadius - this.engravingDepth, y: 0, z, a, moveType: 'linear',
+    });
+    this.lastU = u;
+    this.lastV = v;
+  }
+
+  /** Tessellate a cubic bezier into strokes */
+  cubicTo(x1: number, y1: number, x2: number, y2: number, x: number, y: number, tolerance: number) {
+    const len = bezierLength(this.lastU, this.lastV, x1, y1, x2, y2, x, y);
+    const steps = Math.max(4, Math.ceil(len / tolerance));
+    const { u: u0, v: v0 } = this.position;
+    for (let i = 1; i <= steps; i++) {
+      const pt = cubicBezierPoint(u0, v0, x1, y1, x2, y2, x, y, i / steps);
+      this.lineTo(pt.x, pt.y);
+    }
+  }
+
+  /** Tessellate a quadratic bezier into strokes */
+  quadTo(x1: number, y1: number, x: number, y: number, tolerance: number) {
+    const len = quadBezierLength(this.lastU, this.lastV, x1, y1, x, y);
+    const steps = Math.max(3, Math.ceil(len / tolerance));
+    const { u: u0, v: v0 } = this.position;
+    for (let i = 1; i <= steps; i++) {
+      const pt = quadBezierPoint(u0, v0, x1, y1, x, y, i / steps);
+      this.lineTo(pt.x, pt.y);
+    }
+  }
+
+  /** Retract the tool */
+  lift() {
+    if (!this.penDown) return;
+    const { z, a } = this.map(this.lastU, this.lastV);
+    this.toolpath.push({
+      x: this.surfaceRadius + 2, y: 0, z, a, moveType: 'rapid',
+    });
+    this.penDown = false;
+  }
 }
 
 // ============================================================
@@ -82,138 +188,56 @@ export async function textToToolpath(options: EngravingOptions): Promise<Toolpat
     }
   }
 
-  const toolpath: ToolpathPoint[] = [];
-  const scale = fontSize / font.unitsPerEm;
-
-  // Get glyph paths for the text
+  // getPaths(text, 0, 0, fontSize) returns coordinates ALREADY scaled to
+  // fontSize units (mm here) with glyph advances and kerning applied —
+  // no further scaling is needed.
   const glyphPaths = font.getPaths(text, 0, 0, fontSize);
+  const emitter = new StrokeEmitter(startZ, xOffset, engravingDepth);
 
-  // Current Z offset (text flows along Z axis on the lathe)
-  let currentZ = startZ;
-
-  for (const glyphPath of glyphPaths) {
+  glyphPaths.forEach((glyphPath, glyphIndex) => {
     const commands = glyphPath.commands;
-    if (!commands || commands.length === 0) continue;
+    if (!commands || commands.length === 0) return;
 
-    let penDown = false;
-    let lastX = 0;
-    let lastY = 0;
+    // Optional extra tracking between characters
+    const spacing = letterSpacing * glyphIndex;
+    let contourStart: { u: number; v: number } | null = null;
 
     for (const cmd of commands) {
       switch (cmd.type) {
-        case 'M': {
-          // Move to — lift pen, rapid to new position
-          if (penDown) {
-            // Retract
-            toolpath.push({
-              x: xOffset + 2, y: 0,
-              z: -(lastY * scale / fontSize + currentZ),
-              a: 0, moveType: 'rapid',
-            });
-          }
-          // Rapid to new position above surface
-          const mz = -(cmd.y! * scale / fontSize + currentZ);
-          toolpath.push({
-            x: xOffset + 2, y: 0,
-            z: mz, a: 0, moveType: 'rapid',
-          });
-          // Plunge
-          toolpath.push({
-            x: xOffset - engravingDepth, y: 0,
-            z: mz, a: 0, moveType: 'linear',
-          });
-          lastX = cmd.x!;
-          lastY = cmd.y!;
-          penDown = true;
+        case 'M':
+          emitter.lift();
+          emitter.moveTo(cmd.x! + spacing, cmd.y!);
+          contourStart = { u: cmd.x! + spacing, v: cmd.y! };
           break;
-        }
-
-        case 'L': {
-          // Line to
-          const lz = -(cmd.y! * scale / fontSize + currentZ);
-          toolpath.push({
-            x: xOffset - engravingDepth, y: 0,
-            z: lz, a: 0, moveType: 'linear',
-          });
-          lastX = cmd.x!;
-          lastY = cmd.y!;
+        case 'L':
+          emitter.lineTo(cmd.x! + spacing, cmd.y!);
           break;
-        }
-
-        case 'C': {
-          // Cubic bezier — approximate with line segments
-          const steps = Math.max(4, Math.ceil(
-            bezierLength(lastX, lastY, cmd.x1!, cmd.y1!, cmd.x2!, cmd.y2!, cmd.x!, cmd.y!) * scale / tolerance
-          ));
-          for (let i = 1; i <= steps; i++) {
-            const t = i / steps;
-            const pt = cubicBezierPoint(
-              lastX, lastY,
-              cmd.x1!, cmd.y1!,
-              cmd.x2!, cmd.y2!,
-              cmd.x!, cmd.y!,
-              t
-            );
-            const bz = -(pt.y * scale / fontSize + currentZ);
-            toolpath.push({
-              x: xOffset - engravingDepth, y: 0,
-              z: bz, a: 0, moveType: 'linear',
-            });
-          }
-          lastX = cmd.x!;
-          lastY = cmd.y!;
+        case 'C':
+          emitter.cubicTo(
+            cmd.x1! + spacing, cmd.y1!,
+            cmd.x2! + spacing, cmd.y2!,
+            cmd.x! + spacing, cmd.y!,
+            tolerance
+          );
           break;
-        }
-
-        case 'Q': {
-          // Quadratic bezier
-          const qSteps = Math.max(3, Math.ceil(
-            quadBezierLength(lastX, lastY, cmd.x1!, cmd.y1!, cmd.x!, cmd.y!) * scale / tolerance
-          ));
-          for (let i = 1; i <= qSteps; i++) {
-            const t = i / qSteps;
-            const pt = quadBezierPoint(
-              lastX, lastY,
-              cmd.x1!, cmd.y1!,
-              cmd.x!, cmd.y!,
-              t
-            );
-            const qz = -(pt.y * scale / fontSize + currentZ);
-            toolpath.push({
-              x: xOffset - engravingDepth, y: 0,
-              z: qz, a: 0, moveType: 'linear',
-            });
-          }
-          lastX = cmd.x!;
-          lastY = cmd.y!;
+        case 'Q':
+          emitter.quadTo(
+            cmd.x1! + spacing, cmd.y1!,
+            cmd.x! + spacing, cmd.y!,
+            tolerance
+          );
           break;
-        }
-
-        case 'Z': {
-          // Close path — return to start of this contour
-          // Retract
-          toolpath.push({
-            x: xOffset + 2, y: 0,
-            z: -(lastY * scale / fontSize + currentZ),
-            a: 0, moveType: 'rapid',
-          });
-          penDown = false;
+        case 'Z':
+          // Close the contour back to its starting point, then lift
+          if (contourStart) emitter.lineTo(contourStart.u, contourStart.v);
+          emitter.lift();
           break;
-        }
       }
     }
+    emitter.lift();
+  });
 
-    // Retract after glyph if still down
-    if (penDown) {
-      toolpath.push({
-        x: xOffset + 2, y: 0,
-        z: -(lastY * scale / fontSize + currentZ),
-        a: 0, moveType: 'rapid',
-      });
-    }
-  }
-
-  return toolpath;
+  return emitter.toolpath;
 }
 
 // ============================================================
@@ -222,48 +246,50 @@ export async function textToToolpath(options: EngravingOptions): Promise<Toolpat
 
 /**
  * Parse SVG path "d" attribute and convert to engraving toolpath.
- * Supports M, L, H, V, C, S, Q, T, A, Z commands.
+ * Supports M, L, H, V, C, Q, Z (S/T/A are approximated by their
+ * parsed absolute endpoints via the parser below).
  */
 export function svgPathToToolpath(options: SvgEngravingOptions): ToolpathPoint[] {
   const { svgPathData, scale, engravingDepth, startZ, xOffset, tolerance = 0.2 } = options;
-  const toolpath: ToolpathPoint[] = [];
 
-  // Parse SVG path commands
   const commands = parseSvgPath(svgPathData);
-  let currentX = 0;
-  let currentY = 0;
-  let penDown = false;
+  const emitter = new StrokeEmitter(startZ, xOffset, engravingDepth);
+  let contourStart: { u: number; v: number } | null = null;
 
   for (const cmd of commands) {
     switch (cmd.type) {
-      case 'M': {
-        if (penDown) {
-          toolpath.push({ x: xOffset + 2, y: 0, z: -(currentY * scale + startZ), a: 0, moveType: 'rapid' });
-        }
-        currentX = cmd.x!;
-        currentY = cmd.y!;
-        const mz = -(currentY * scale + startZ);
-        toolpath.push({ x: xOffset + 2, y: 0, z: mz, a: 0, moveType: 'rapid' });
-        toolpath.push({ x: xOffset - engravingDepth, y: 0, z: mz, a: 0, moveType: 'linear' });
-        penDown = true;
+      case 'M':
+        emitter.lift();
+        emitter.moveTo(cmd.x! * scale, cmd.y! * scale);
+        contourStart = { u: cmd.x! * scale, v: cmd.y! * scale };
         break;
-      }
-      case 'L': {
-        currentX = cmd.x!;
-        currentY = cmd.y!;
-        toolpath.push({ x: xOffset - engravingDepth, y: 0, z: -(currentY * scale + startZ), a: 0, moveType: 'linear' });
+      case 'L':
+        emitter.lineTo(cmd.x! * scale, cmd.y! * scale);
         break;
-      }
-      case 'Z': {
-        toolpath.push({ x: xOffset + 2, y: 0, z: -(currentY * scale + startZ), a: 0, moveType: 'rapid' });
-        penDown = false;
+      case 'C':
+        emitter.cubicTo(
+          cmd.x1! * scale, cmd.y1! * scale,
+          cmd.x2! * scale, cmd.y2! * scale,
+          cmd.x! * scale, cmd.y! * scale,
+          tolerance
+        );
         break;
-      }
-      // C, Q handled similarly to text — omitted for brevity, uses same bezier functions
+      case 'Q':
+        emitter.quadTo(
+          cmd.x1! * scale, cmd.y1! * scale,
+          cmd.x! * scale, cmd.y! * scale,
+          tolerance
+        );
+        break;
+      case 'Z':
+        if (contourStart) emitter.lineTo(contourStart.u, contourStart.v);
+        emitter.lift();
+        break;
     }
   }
 
-  return toolpath;
+  emitter.lift();
+  return emitter.toolpath;
 }
 
 // ============================================================
@@ -398,6 +424,24 @@ function parseSvgPath(d: string): SvgCommand[] {
           cy = abs ? nums[i + 5] : cy + nums[i + 5];
         }
         break;
+      case 'S':
+        // Smooth cubic: approximate by treating the first control point as
+        // the current position (loses smooth reflection, keeps the shape)
+        for (let i = 0; i < nums.length; i += 4) {
+          const abs = type === 'S';
+          commands.push({
+            type: 'C',
+            x1: cx,
+            y1: cy,
+            x2: abs ? nums[i] : cx + nums[i],
+            y2: abs ? nums[i + 1] : cy + nums[i + 1],
+            x: abs ? nums[i + 2] : cx + nums[i + 2],
+            y: abs ? nums[i + 3] : cy + nums[i + 3],
+          });
+          cx = abs ? nums[i + 2] : cx + nums[i + 2];
+          cy = abs ? nums[i + 3] : cy + nums[i + 3];
+        }
+        break;
       case 'Q':
         for (let i = 0; i < nums.length; i += 4) {
           const abs = type === 'Q';
@@ -410,6 +454,30 @@ function parseSvgPath(d: string): SvgCommand[] {
           });
           cx = abs ? nums[i + 2] : cx + nums[i + 2];
           cy = abs ? nums[i + 3] : cy + nums[i + 3];
+        }
+        break;
+      case 'T':
+        // Smooth quadratic: control point approximated at current position
+        for (let i = 0; i < nums.length; i += 2) {
+          const abs = type === 'T';
+          commands.push({
+            type: 'Q',
+            x1: cx,
+            y1: cy,
+            x: abs ? nums[i] : cx + nums[i],
+            y: abs ? nums[i + 1] : cy + nums[i + 1],
+          });
+          cx = abs ? nums[i] : cx + nums[i];
+          cy = abs ? nums[i + 1] : cy + nums[i + 1];
+        }
+        break;
+      case 'A':
+        // Arc: approximate with a straight line to the endpoint (7 params each)
+        for (let i = 0; i < nums.length; i += 7) {
+          const abs = type === 'A';
+          cx = abs ? nums[i + 5] : cx + nums[i + 5];
+          cy = abs ? nums[i + 6] : cy + nums[i + 6];
+          commands.push({ type: 'L', x: cx, y: cy });
         }
         break;
     }

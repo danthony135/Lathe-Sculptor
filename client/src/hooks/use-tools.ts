@@ -26,7 +26,10 @@ export function useCreateTool() {
         body: JSON.stringify(data),
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to create tool");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.message || "Failed to create tool");
+      }
       return api.tools.create.responses[201].parse(await res.json());
     },
     onSuccess: () => {
@@ -52,7 +55,10 @@ export function useUpdateTool() {
         body: JSON.stringify(data),
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to update tool");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.message || "Failed to update tool");
+      }
       return api.tools.update.responses[200].parse(await res.json());
     },
     onSuccess: () => {

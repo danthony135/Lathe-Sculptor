@@ -77,9 +77,11 @@ function generateRasterToolpath(
     const angleIdx = Math.round(targetAngle / angleResolution) % angleCount;
     const angle = angleIdx * angleResolution;
 
-    // Rapid to start position
+    // Rapid to start position. The part spans Z0..-stockLength (Z0 at the
+    // spindle face); boundaryOffset insets INTO the part — positive Z is
+    // behind the spindle face and would park the tool at the chuck.
     toolpath.push({
-      x: safeRadius, y: 0, z: direction > 0 ? boundaryOffset : -(options.stockLength - boundaryOffset),
+      x: safeRadius, y: 0, z: direction > 0 ? -boundaryOffset : -(options.stockLength - boundaryOffset),
       a: angle, moveType: 'rapid',
     });
 
@@ -119,7 +121,7 @@ function generateRasterToolpath(
     // Retract
     toolpath.push({
       x: safeRadius, y: 0,
-      z: direction > 0 ? -(options.stockLength - boundaryOffset) : boundaryOffset,
+      z: direction > 0 ? -(options.stockLength - boundaryOffset) : -boundaryOffset,
       a: angle, moveType: 'rapid',
     });
 
@@ -148,15 +150,15 @@ function generateSpiralToolpath(
   const totalRevolutions = stockLength / pitch;
   const totalSteps = Math.ceil(totalRevolutions * angleCount);
 
-  // Start position
+  // Start position (inset into the part — positive Z is behind the spindle face)
   toolpath.push({
-    x: safeRadius, y: 0, z: boundaryOffset,
+    x: safeRadius, y: 0, z: -boundaryOffset,
     a: 0, moveType: 'rapid',
   });
 
   for (let step = 0; step <= totalSteps; step++) {
     const angle = (step * angleResolution) % 360;
-    const z = -(step / angleCount) * pitch;
+    const z = -boundaryOffset - (step / angleCount) * pitch;
 
     if (z < -(stockLength - boundaryOffset)) break;
 
@@ -377,15 +379,15 @@ export function generateRoughingToolpath(
   // Rough from stock surface down in steps
   let currentRadius = stockRadius;
 
-  while (currentRadius > roughTarget + stepdown) {
-    currentRadius -= stepdown;
+  while (currentRadius > roughTarget) {
+    // Clamp the last level to the target so we don't stop a full stepdown short
+    currentRadius = Math.max(currentRadius - stepdown, roughTarget);
 
-    // Full 360° pass at this depth for each Z position
     for (let zi = 0; zi < samples.length; zi++) {
       const row = samples[zi];
 
-      // Check if any sample at this Z is deeper than current level
-      const needsCut = row.some(s => s.radius < currentRadius);
+      // Skip rows where the whole surface is above this level
+      const needsCut = row.some(s => s.radius + finishAllowance < currentRadius);
       if (!needsCut) continue;
 
       // Approach
@@ -394,11 +396,17 @@ export function generateRoughingToolpath(
         a: 0, moveType: 'rapid',
       });
 
-      // Cut full circle at this depth
+      // Revolution at this level. Where the finished surface (plus
+      // allowance) sits ABOVE the current level, follow the surface
+      // instead of the level — a constant-radius circle there would gouge
+      // material that must remain.
       for (let ai = 0; ai <= angleCount; ai++) {
-        const angle = (ai % angleCount) * angleResolution;
+        const idx = ai % angleCount;
+        const angle = idx * angleResolution;
+        const sample = row[idx];
+        const floorRadius = sample ? sample.radius + finishAllowance : currentRadius;
         toolpath.push({
-          x: currentRadius + toolRadius,
+          x: Math.max(currentRadius, floorRadius) + toolRadius,
           y: 0,
           z: row[0].z,
           a: angle,
@@ -413,6 +421,8 @@ export function generateRoughingToolpath(
         a: 0, moveType: 'rapid',
       });
     }
+
+    if (currentRadius <= roughTarget) break;
   }
 
   return toolpath;

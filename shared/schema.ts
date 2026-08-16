@@ -247,6 +247,7 @@ export interface ThreadingParams {
   pitch: number;               // mm per revolution
   threadDepth: number;         // mm (radial)
   threadType: 'external' | 'internal';
+  boreDiameter?: number;       // mm - pre-drilled bore for internal threads (required for internal)
   threadForm: 'v60' | 'acme' | 'buttress' | 'custom';
   startZ: number;              // mm
   endZ: number;                // mm

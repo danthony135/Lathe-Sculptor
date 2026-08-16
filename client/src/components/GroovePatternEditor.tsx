@@ -103,7 +103,9 @@ export function GroovePatternEditor({
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = e.currentTarget;
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
+    // The canvas is CSS-stretched (w-full): convert CSS pixels to the
+    // canvas's internal coordinate system before mapping to Z
+    const x = (e.clientX - rect.left) * (viewWidth / rect.width);
 
     // Convert pixel X to Z position
     const zRatio = (x - margin) / (viewWidth - margin * 2);

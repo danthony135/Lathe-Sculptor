@@ -102,8 +102,12 @@ export function sampleSurface(
       const rayDirX = -Math.cos(angleRad);
       const rayDirY = -Math.sin(angleRad);
 
-      // Cast ray against all triangles
-      let closestHit = stockRadius; // Default to stock surface
+      // Cast ray against all triangles. Track the smallest DISTANCE along
+      // the ray (the first surface the ray meets, i.e. the outermost mesh
+      // surface); convert to a radius only once, after the scan. Mixing the
+      // two units in one variable made every comparison after the first hit
+      // meaningless and could report radii far too small (gouge risk).
+      let closestDist = Infinity;
       let hitNormal: Point3D = { x: rayDirX, y: rayDirY, z: 0 };
 
       for (const tri of triangles) {
@@ -112,16 +116,20 @@ export function sampleSurface(
           { x: rayDirX, y: rayDirY, z: 0 },
           tri
         );
-        if (hit !== null && hit < closestHit) {
-          closestHit = stockRadius - hit; // Convert distance to radius
+        if (hit !== null && hit < closestDist) {
+          closestDist = hit;
           hitNormal = tri.normal || hitNormal;
         }
       }
 
+      const surfaceRadius = closestDist === Infinity
+        ? stockRadius                 // No mesh here — stock surface remains
+        : stockRadius - closestDist;  // Distance from axis to the mesh surface
+
       row.push({
         z,
         angle,
-        radius: Math.max(0.5, closestHit), // Min radius to avoid center
+        radius: Math.max(0.5, surfaceRadius), // Min radius to avoid center
         normal: hitNormal,
       });
     }

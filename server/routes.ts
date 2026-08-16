@@ -84,10 +84,14 @@ export async function registerRoutes(
     const machineConfigSetting = await storage.getSetting('machine_config');
     const machineConfig = machineConfigSetting?.value as MachineConfig | undefined;
 
+    // Load tool library so geometry/wear offsets are applied to coordinates
+    const toolLibrary = await storage.getTools();
+
     // Generate G-code using the Catek generator with project name
     const gcode = generateGCode(project.data as any, {
       projectName: project.name,
       machineConfig,
+      tools: toolLibrary,
     });
 
     // Parse G-code back to toolpath for visualization only. Do NOT save it
@@ -124,6 +128,15 @@ export async function registerRoutes(
   app.post(api.tools.create.path, async (req, res) => {
     try {
       const input = api.tools.create.input.parse(req.body);
+      // Tool numbers map 1:1 to turret positions and cylinder M-codes —
+      // duplicates would make Ttttt selection ambiguous
+      const existing = await storage.getTools();
+      if (existing.some(t => t.toolNumber === input.toolNumber)) {
+        return res.status(400).json({
+          message: `Tool number ${input.toolNumber} is already in use`,
+          field: 'toolNumber',
+        });
+      }
       const tool = await storage.createTool(input);
       res.status(201).json(tool);
     } catch (err) {
@@ -140,6 +153,16 @@ export async function registerRoutes(
   app.put(api.tools.update.path, async (req, res) => {
     try {
       const input = api.tools.update.input.parse(req.body);
+      if (input.toolNumber !== undefined) {
+        const existing = await storage.getTools();
+        const id = Number(req.params.id);
+        if (existing.some(t => t.toolNumber === input.toolNumber && t.id !== id)) {
+          return res.status(400).json({
+            message: `Tool number ${input.toolNumber} is already in use`,
+            field: 'toolNumber',
+          });
+        }
+      }
       const tool = await storage.updateTool(Number(req.params.id), input);
       if (!tool) return res.status(404).json({ message: 'Tool not found' });
       res.json(tool);

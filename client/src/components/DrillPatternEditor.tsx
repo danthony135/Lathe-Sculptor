@@ -147,7 +147,19 @@ export function DrillPatternEditor({
               <div key={i} className="flex items-center gap-2 text-xs bg-muted/30 rounded px-2 py-1">
                 <Badge variant="secondary" className="font-mono text-[10px]">{i + 1}</Badge>
                 <span className="font-mono">{angle}°</span>
-                <span className="text-muted-foreground">Z={pattern.positions[i]?.z?.toFixed(0) || 0}</span>
+                <span className="text-muted-foreground">Z=</span>
+                <input
+                  type="number"
+                  value={pattern.positions[i]?.z ?? 0}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    if (isNaN(v)) return;
+                    const positions = [...pattern.positions];
+                    positions[i] = { ...positions[i], z: v };
+                    onChange({ ...pattern, positions });
+                  }}
+                  className="w-16 h-5 px-1 font-mono text-[10px] border rounded bg-background"
+                />
                 <Button variant="ghost" size="icon" className="h-5 w-5 ml-auto" onClick={() => removeHole(i)}>
                   <Trash2 className="w-3 h-3 text-destructive" />
                 </Button>

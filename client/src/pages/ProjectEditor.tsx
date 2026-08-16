@@ -95,9 +95,12 @@ export default function ProjectEditor() {
     toolpath: ToolpathPoint[];
   } | null>(null);
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts (re-bound each render so the handlers stay fresh)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // During loading renders the handlers below this hook are not yet
+      // declared — invoking them would throw a TDZ ReferenceError
+      if (isLoading || !project) return;
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
         handleUndo();
@@ -1038,6 +1041,18 @@ export default function ProjectEditor() {
                                         setHasUnsavedChanges(true);
                                       }} className="font-mono text-right" />
                                   </div>
+                                  {op.params.threading?.threadType === 'internal' && (
+                                    <div className="space-y-1 col-span-2">
+                                      <Label className="text-xs">Bore Diameter (mm) — pre-drilled hole, required</Label>
+                                      <Input type="number" step="0.1" value={op.params.threading?.boreDiameter ?? ''}
+                                        placeholder="e.g. 20"
+                                        onChange={e => {
+                                          const v = parseFloat(e.target.value);
+                                          setLocalData(prev => prev ? ({ ...prev, operations: prev.operations.map(o => o.id === op.id ? { ...o, params: { ...o.params, threading: { ...o.params.threading!, boreDiameter: isNaN(v) ? undefined : v } } } : o) }) : null);
+                                          setHasUnsavedChanges(true);
+                                        }} className="font-mono text-right" />
+                                    </div>
+                                  )}
                                 </div>
                               )}
 
