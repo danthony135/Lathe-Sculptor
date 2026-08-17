@@ -129,6 +129,13 @@ function opOffset(op: Operation, ctx: OpContext): ToolOffset {
 function withToolCylinder(lines: string[], toolNumber: number, config?: MachineConfig): string[] {
   const codes = getToolCylinderCodes(toolNumber, config);
   if (!codes) return lines;
+  // A body that is only comments/blank lines (e.g. a skipped operation)
+  // gets no cylinder actuation — don't cycle pneumatics for a no-op
+  const hasMotion = lines.some(l => {
+    const t = l.trim();
+    return t && !t.startsWith('(');
+  });
+  if (!hasMotion) return lines;
   const out = [...lines];
   const tIdx = out.findIndex(l => /^T\d{4}$/.test(l.trim()));
   if (tIdx >= 0) out.splice(tIdx + 1, 0, codes.engage);
@@ -163,7 +170,11 @@ export function generateGCode(
     sandingFeed = 1500,
   } = options;
 
-  if (!data || !data.toolpath || data.toolpath.length === 0) {
+  // A profile toolpath is only required for profile-following operations
+  // (roughing/turning/sanding) — drilling, grooving, threading, planing
+  // jobs are fully described by their own parameters.
+  const hasProfile = !!(data?.toolpath && data.toolpath.length > 0);
+  if (!data || (!hasProfile && !(data.operations && data.operations.length > 0))) {
     return "No toolpath data";
   }
 
@@ -326,6 +337,11 @@ function generateOperationGCode(data: ProjectData, op: Operation, ctx: OpContext
 
 function generateRoughingGCode(data: ProjectData, op: Operation, ctx: OpContext): string[] {
   const gcode: string[] = [];
+  if (!data.toolpath || data.toolpath.length === 0) {
+    // Without a profile the rough target would compute as ~0 diameter
+    gcode.push('(ROUGHING SKIPPED: no profile toolpath - import geometry first)');
+    return gcode;
+  }
   const spindleCodes = getSpindleCodes(op.spindleId, ctx.machineConfig);
   const rpm = op.params.spindleSpeed || ctx.spindleRPM;
   const feed = op.params.feedRate || ctx.cuttingFeed;
@@ -375,6 +391,10 @@ function generateRoughingGCode(data: ProjectData, op: Operation, ctx: OpContext)
 
 function generateTurningGCode(data: ProjectData, op: Operation, ctx: OpContext): string[] {
   const gcode: string[] = [];
+  if (!data.toolpath || data.toolpath.length === 0) {
+    gcode.push('(TURNING SKIPPED: no profile toolpath - import geometry first)');
+    return gcode;
+  }
   const spindleCodes = getSpindleCodes(op.spindleId, ctx.machineConfig);
   const feed = op.params.feedRate || ctx.cuttingFeed;
 
@@ -402,6 +422,10 @@ function generateTurningGCode(data: ProjectData, op: Operation, ctx: OpContext):
 
 function generateSandingOpGCode(data: ProjectData, op: Operation, ctx: OpContext): string[] {
   const gcode: string[] = [];
+  if (!data.toolpath || data.toolpath.length === 0) {
+    gcode.push('(SANDING SKIPPED: no profile toolpath - import geometry first)');
+    return gcode;
+  }
   const spindleCodes = getSpindleCodes(op.spindleId ?? 'sanding', ctx.machineConfig);
   const actualPaddleOffset = op.params.paddleOffset ?? ctx.paddleOffset;
   const actualFeed = op.params.feedRate ?? ctx.sandingFeed;

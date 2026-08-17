@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useParams, Link } from "wouter";
 import { useProject, useUpdateProject, useGenerateGCode } from "@/hooks/use-projects";
 import { useTools } from "@/hooks/use-tools";
@@ -85,6 +85,10 @@ export default function ProjectEditor() {
   const [showImporter, setShowImporter] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [simulationProgress, setSimulationProgress] = useState(0);
+  // Toolpath parsed back from the last generated G-code — lets the
+  // simulator run even when the project has no imported profile toolpath
+  // (e.g. drilling/grooving-only jobs)
+  const [generatedToolpath, setGeneratedToolpath] = useState<ToolpathPoint[]>([]);
   const [selectedToolNumber, setSelectedToolNumber] = useState<number>(1);
   const [collisionWarnings, setCollisionWarnings] = useState<string[]>([]);
   const [expandedOps, setExpandedOps] = useState<Set<string>>(new Set());
@@ -123,10 +127,32 @@ export default function ProjectEditor() {
   useEffect(() => {
     if (project?.data && !initialLoaded) {
       const data = project.data as unknown as ProjectData;
+      let toolpath = data.toolpath || [];
+
+      // Heal projects saved before the generate-G-code fix: that bug
+      // overwrote the design toolpath in the database, but the imported
+      // geometry survived — rebuild the toolpath from it.
+      if (toolpath.length === 0 && data.geometry) {
+        const stockDiameter = data.stock?.diameter || DEFAULT_PROJECT_DATA.stock.diameter;
+        try {
+          const rebuilt = geometryToToolpath(data.geometry, stockDiameter, 0, 0, 1);
+          if (rebuilt.length > 0) {
+            toolpath = rebuilt;
+            setHasUnsavedChanges(true);
+            toast({
+              title: "Toolpath restored",
+              description: `Rebuilt ${rebuilt.length} points from the imported geometry. Save to keep it.`,
+            });
+          }
+        } catch {
+          // Geometry couldn't be converted — leave the toolpath empty
+        }
+      }
+
       setLocalData({
         stock: { ...DEFAULT_PROJECT_DATA.stock, ...data.stock },
         machineSettings: { ...DEFAULT_PROJECT_DATA.machineSettings, ...data.machineSettings },
-        toolpath: data.toolpath || [],
+        toolpath,
         operations: data.operations || [],
         geometry: data.geometry,
         quantity: data.quantity || 1,
@@ -197,7 +223,10 @@ export default function ProjectEditor() {
         await handleSave();
       }
       generateGCode.mutate(projectId, {
-        onSuccess: () => {
+        onSuccess: (result: any) => {
+          if (result?.toolpath?.length) {
+            setGeneratedToolpath(result.toolpath);
+          }
           toast({ title: "G-code generated", description: `${opCount} operations processed successfully.` });
         },
         onError: (err: any) => {
@@ -472,6 +501,10 @@ export default function ProjectEditor() {
 
   const currentTool = tools?.find(t => t.toolNumber === selectedToolNumber);
 
+  // What the 3D view and simulator run on: the design toolpath when there
+  // is one, otherwise the toolpath parsed from the last generated G-code
+  const displayToolpath = localData.toolpath.length > 0 ? localData.toolpath : generatedToolpath;
+
   return (
     <div className="h-screen flex flex-col bg-background overflow-hidden">
       <header className="h-14 border-b border-border bg-card flex items-center justify-between gap-4 px-4 shrink-0">
@@ -515,10 +548,13 @@ export default function ProjectEditor() {
           >
             <Save className="w-4 h-4 mr-2" /> Save
           </Button>
-          <Button 
-            size="sm" 
+          <Button
+            size="sm"
             onClick={handleGenerate}
-            disabled={generateGCode.isPending || localData.toolpath.length === 0}
+            disabled={generateGCode.isPending || (localData.toolpath.length === 0 && localData.operations.length === 0)}
+            title={localData.toolpath.length === 0 && localData.operations.length === 0
+              ? "Import a CAD file or add an operation first"
+              : undefined}
             data-testid="button-generate"
           >
             <Play className="w-4 h-4 mr-2" /> Generate G-Code
@@ -1298,7 +1334,10 @@ export default function ProjectEditor() {
                   variant={isSimulating ? "destructive" : "default"}
                   size="sm"
                   onClick={toggleSimulation}
-                  disabled={localData.toolpath.length === 0}
+                  disabled={displayToolpath.length === 0}
+                  title={displayToolpath.length === 0
+                    ? "Import a CAD file or generate G-code first"
+                    : undefined}
                   data-testid="button-simulate"
                 >
                   {isSimulating ? (
@@ -1354,21 +1393,27 @@ export default function ProjectEditor() {
                 </div>
               </div>
 
-              <ThreeCanvas
-                stock={localData.stock}
-                toolpath={localData.toolpath}
-                currentTool={currentTool}
-                isSimulating={isSimulating}
-                simulationProgress={simulationProgress}
-                onSimulationComplete={() => {
-                  setIsSimulating(false);
-                  toast({ title: "Simulation complete" });
-                }}
-                onProgressUpdate={(p) => setSimulationProgress(p)}
-                className="flex-1"
-                importedGeometry={localData.geometry}
-                operations={localData.operations}
-              />
+              {/* Suspense boundary: if anything inside the 3D subtree
+                  suspends (font loading, context setup), only the viewer
+                  waits — without this, a suspended canvas silently blocks
+                  every state update in the rest of the editor */}
+              <Suspense fallback={<div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading 3D viewer…</div>}>
+                <ThreeCanvas
+                  stock={localData.stock}
+                  toolpath={displayToolpath}
+                  currentTool={currentTool}
+                  isSimulating={isSimulating}
+                  simulationProgress={simulationProgress}
+                  onSimulationComplete={() => {
+                    setIsSimulating(false);
+                    toast({ title: "Simulation complete" });
+                  }}
+                  onProgressUpdate={(p) => setSimulationProgress(p)}
+                  className="flex-1"
+                  importedGeometry={localData.geometry}
+                  operations={localData.operations}
+                />
+              </Suspense>
             </>
           )}
         </main>
