@@ -444,11 +444,39 @@ export async function registerRoutes(
 
 async function seedDefaultTools() {
   const existingTools = await storage.getTools();
+
+  // Migrate libraries seeded with the pre-correction numbering. On the
+  // real turret the knives are tools 4/5 and the sander is tool 6 (the
+  // drill, router and planer take 1-3). Only fires when the library still
+  // exactly matches the old default layout — customized libraries are
+  // left alone.
+  if (existingTools.length > 0) {
+    const OLD_TO_NEW = [
+      { name: 'Turning Knife #1', from: 1, to: 4 },
+      { name: 'Turning Knife #2', from: 2, to: 5 },
+      { name: 'Sanding Tool', from: 3, to: 6 },
+      { name: 'Drill Tool', from: 4, to: 1 },
+      { name: 'Router / Engraving Tool', from: 5, to: 2 },
+      { name: 'Planer Blade', from: 6, to: 3 },
+    ];
+    const matchesOldLayout = OLD_TO_NEW.every(m =>
+      existingTools.some(t => t.name === m.name && t.toolNumber === m.from)
+    );
+    if (matchesOldLayout) {
+      for (const m of OLD_TO_NEW) {
+        const tool = existingTools.find(t => t.name === m.name && t.toolNumber === m.from)!;
+        await storage.updateTool(tool.id, { toolNumber: m.to });
+      }
+      console.log('Tool library migrated: knives are now tools 4/5, sander is tool 6');
+    }
+    return;
+  }
+
   if (existingTools.length === 0) {
     // Catek 7-in-1 Wood Lathe Tools
     const defaultTools = [
       {
-        toolNumber: 1,
+        toolNumber: 4,
         name: "Turning Knife #1",
         type: "turning",
         params: {
@@ -460,7 +488,7 @@ async function seedDefaultTools() {
         }
       },
       {
-        toolNumber: 2,
+        toolNumber: 5,
         name: "Turning Knife #2",
         type: "turning",
         params: {
@@ -472,7 +500,7 @@ async function seedDefaultTools() {
         }
       },
       {
-        toolNumber: 3,
+        toolNumber: 6,
         name: "Sanding Tool",
         type: "sanding",
         params: {
@@ -483,7 +511,7 @@ async function seedDefaultTools() {
         }
       },
       {
-        toolNumber: 4,
+        toolNumber: 1,
         name: "Drill Tool",
         type: "drilling",
         params: {
@@ -495,7 +523,7 @@ async function seedDefaultTools() {
         }
       },
       {
-        toolNumber: 5,
+        toolNumber: 2,
         name: "Router / Engraving Tool",
         type: "routing",
         params: {
@@ -507,7 +535,7 @@ async function seedDefaultTools() {
         }
       },
       {
-        toolNumber: 6,
+        toolNumber: 3,
         name: "Planer Blade",
         type: "planing",
         params: {

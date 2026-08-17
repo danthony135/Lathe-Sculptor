@@ -536,7 +536,7 @@ function generateOperationSequence(
   if (shapeResult.shape === 'axisymmetric' || shapeResult.shape === 'unknown') {
     ops.push({
       id: nextOpId(),
-      toolNumber: 1,
+      toolNumber: 4,
       type: 'roughing',
       rotationMode: 'continuous',
       spindleId: 'main',
@@ -554,7 +554,7 @@ function generateOperationSequence(
   if (hasProfile || shapeResult.shape === 'axisymmetric') {
     ops.push({
       id: nextOpId(),
-      toolNumber: 1,
+      toolNumber: 4,
       type: 'turning',
       rotationMode: 'continuous',
       spindleId: 'main',
@@ -596,7 +596,7 @@ function generateOperationSequence(
   if (holes.length > 0) {
     ops.push({
       id: nextOpId(),
-      toolNumber: 4,
+      toolNumber: 1,
       type: 'drilling',
       rotationMode: 'static',
       spindleId: 'milling1',
@@ -626,7 +626,7 @@ function generateOperationSequence(
     const indexCount = flats.length || 4;
     ops.push({
       id: nextOpId(),
-      toolNumber: 6,
+      toolNumber: 2,
       type: 'milling',
       rotationMode: 'indexed',
       spindleId: 'milling1',
@@ -718,7 +718,7 @@ function generateOperationSequence(
   if (shapeResult.shape === 'axisymmetric' || shapeResult.shape === 'unknown') {
     ops.push({
       id: nextOpId(),
-      toolNumber: 3,
+      toolNumber: 6,
       type: 'sanding',
       rotationMode: 'continuous',
       spindleId: 'sanding',

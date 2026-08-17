@@ -11,12 +11,12 @@ import {
 
 // Descriptions for the default Catek tool positions (matches seeded tool library)
 const TOOL_DESCRIPTIONS: Record<number, string> = {
-  1: "Turning Knife #1 — primary profile cuts",
-  2: "Turning Knife #2 — detail work",
-  3: "Sanding Tool — rotary sanding attachment",
-  4: "Drill Tool — center drilling and boring",
-  5: "Router / Engraving Tool",
-  6: "Planer Blade — surface planing",
+  1: "Drill Tool — center drilling and boring",
+  2: "Router / Engraving Tool",
+  3: "Planer Blade — surface planing",
+  4: "Turning Knife #1 — primary profile cuts",
+  5: "Turning Knife #2 — detail work",
+  6: "Sanding Tool — rotary sanding attachment",
   7: "Parting / Grooving Tool",
   8: "V-Bit 60° — V-carving and engraving",
   9: "Ball Nose 6mm — 3D carving",
@@ -224,9 +224,9 @@ export default function Training() {
                 </TableBody>
               </Table>
               <p className="text-xs text-muted-foreground mt-3">
-                Example: to cut with tool 1, the program issues <span className="font-mono">T0101</span> then{" "}
-                <span className="font-mono">{cylinderCodes[1]?.engage ?? "M70"}</span> to engage, and{" "}
-                <span className="font-mono">{cylinderCodes[1]?.disengage ?? "M71"}</span> when the pass is done.
+                Example: to cut with tool 4 (Turning Knife #1), the program issues <span className="font-mono">T0404</span> then{" "}
+                <span className="font-mono">{cylinderCodes[4]?.engage ?? "M76"}</span> to engage, and{" "}
+                <span className="font-mono">{cylinderCodes[4]?.disengage ?? "M77"}</span> when the pass is done.
                 Edit these codes in Settings → M-Codes if your machine differs.
               </p>
             </CardContent>

@@ -89,7 +89,7 @@ export default function ProjectEditor() {
   // simulator run even when the project has no imported profile toolpath
   // (e.g. drilling/grooving-only jobs)
   const [generatedToolpath, setGeneratedToolpath] = useState<ToolpathPoint[]>([]);
-  const [selectedToolNumber, setSelectedToolNumber] = useState<number>(1);
+  const [selectedToolNumber, setSelectedToolNumber] = useState<number>(4);
   const [collisionWarnings, setCollisionWarnings] = useState<string[]>([]);
   const [expandedOps, setExpandedOps] = useState<Set<string>>(new Set());
   const [draggedOpId, setDraggedOpId] = useState<string | null>(null);

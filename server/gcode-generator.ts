@@ -164,7 +164,7 @@ export function generateGCode(
     roughingDiameter = data.stock?.diameter || 110,
     singleRoughingPass = true,
     knifeToolNumber = 4,
-    sandingToolNumber = 3,
+    sandingToolNumber = 6,
     paddleOffset = 1.0,
     sandingRPM = 2400,
     sandingFeed = 1500,
@@ -1383,7 +1383,7 @@ export function generateSandingGCode(
 ): string[] {
   const gcode: string[] = [];
   const {
-    toolNumber = 3,
+    toolNumber = 6,
     sandingRPM = 2400,
     sandingFeed = 1500,
     passes = 2,
