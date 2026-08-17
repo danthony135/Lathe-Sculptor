@@ -448,28 +448,38 @@ function SandingToolModel({ width = 50 }: { width?: number }) {
   );
 }
 
-/** Planer head: horizontal cutter drum with straight knives, spinning above the part */
+/** Planer head: VERTICAL spindle with a cutterhead spinning about the
+ * vertical axis, knives on the perimeter, cutting face at the origin */
 function PlanerToolModel({ width = 60 }: { width?: number }) {
-  const drumR = 12;
-  const len = Math.min(Math.max(width, 40), 90);
+  const headR = Math.min(Math.max(width / 2, 20), 45);
+  const headH = 22;
   return (
     <group>
-      {/* Motor housing */}
-      <mesh position={[0, drumR * 2 + 16, 0]}>
-        <boxGeometry args={[len * 0.7, 18, 22]} />
+      {/* Motor housing on top */}
+      <mesh position={[0, headH + 30, 0]}>
+        <cylinderGeometry args={[headR * 0.55, headR * 0.55, 26, 24]} />
         <meshStandardMaterial {...HOLDER} />
       </mesh>
-      {/* Cutter drum — axis along the part (local X), knives at the bottom */}
-      <mesh position={[0, drumR, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[drumR, drumR, len, 24]} />
+      {/* Spindle shaft */}
+      <mesh position={[0, headH + 9, 0]}>
+        <cylinderGeometry args={[6, 6, 10, 16]} />
         <meshStandardMaterial {...STEEL} />
       </mesh>
-      {/* Straight knives along the drum */}
+      {/* Cutterhead — vertical axis, bottom face at the origin */}
+      <mesh position={[0, headH / 2, 0]}>
+        <cylinderGeometry args={[headR, headR, headH, 32]} />
+        <meshStandardMaterial {...STEEL} />
+      </mesh>
+      {/* Vertical knives on the perimeter */}
       {[0, 120, 240].map(a => {
         const rad = (a * Math.PI) / 180;
         return (
-          <mesh key={a} position={[0, drumR + Math.sin(rad) * (drumR - 0.5), Math.cos(rad) * (drumR - 0.5)]} rotation={[rad, 0, 0]}>
-            <boxGeometry args={[len - 4, 1, 4]} />
+          <mesh
+            key={a}
+            position={[Math.cos(rad) * (headR - 0.5), headH / 2, Math.sin(rad) * (headR - 0.5)]}
+            rotation={[0, -rad, 0]}
+          >
+            <boxGeometry args={[1.2, headH - 2, 6]} />
             <meshStandardMaterial {...CARBIDE} />
           </mesh>
         );
